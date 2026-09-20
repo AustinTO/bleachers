@@ -1,0 +1,129 @@
+diff --git a/rs/web-transport-ffi/Cargo.toml b/rs/web-transport-ffi/Cargo.toml
+--- a/rs/web-transport-ffi/Cargo.toml
++++ b/rs/web-transport-ffi/Cargo.toml
+@@ -26,6 +26,7 @@ http = "1"
+ quinn = { version = "0.11", default-features = false, features = ["runtime-tokio"] }
+ rustls = { version = "0.23", default-features = false, features = ["std"] }
+ rustls-native-certs = "0.8"
++webpki-roots = "1"
+ thiserror = "2"
+ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+ tokio-util = "0.7"
+diff --git a/rs/web-transport-ffi/src/client.rs b/rs/web-transport-ffi/src/client.rs
+--- a/rs/web-transport-ffi/src/client.rs
++++ b/rs/web-transport-ffi/src/client.rs
+@@ -83,14 +83,21 @@ impl Client {
+                 .with_custom_certificate_verifier(fingerprints)
+                 .with_no_client_auth()
+         } else {
+             let mut roots = rustls::RootCertStore::empty();
+             let native = rustls_native_certs::load_native_certs();
+             // Errors loading individual certs are non-fatal; we still want
+             // whatever the platform yielded.
+             for cert in native.certs {
+                 let _ = roots.add(cert);
+             }
++            // Some mobile targets (notably Android builds using rustls-native-certs)
++            // may not expose a discoverable filesystem CA bundle. Preserve the
++            // platform roots when present, but avoid an empty trust store by
++            // falling back to Mozilla's compiled root set.
++            if roots.roots.is_empty() {
++                roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
++            }
+             tls_builder
+                 .with_root_certificates(roots)
+                 .with_no_client_auth()
+         };
+@@ -143,20 +150,32 @@ impl Client {
+         }))
+     }
+     /// Open a WebTransport session to `url`.
+     pub async fn connect(&self, url: String) -> Result<Arc<Session>, WebTransportError> {
++        self.connect_with_protocols(url, Vec::new()).await
++    }
++
++    /// Open a WebTransport session to `url`, offering WebTransport
++    /// subprotocols through WT-Available-Protocols.
++    pub async fn connect_with_protocols(
++        &self,
++        url: String,
++        protocols: Vec<String>,
++    ) -> Result<Arc<Session>, WebTransportError> {
+         let client = self.inner.clone();
+         let parsed: url::Url = url
+             .parse()
+             .map_err(|e| WebTransportError::invalid(format!("invalid URL: {e}")))?;
++        let request = web_transport_quinn::proto::ConnectRequest::new(parsed)
++            .with_protocols(protocols);
+ 
+         let handle =
+-            RUNTIME.spawn(async move { client.connect(parsed).await.map_err(map_client_error) });
++            RUNTIME.spawn(async move { client.connect(request).await.map_err(map_client_error) });
+         let session = handle
+             .await
+             .map_err(|e| WebTransportError::Io(format!("connect task: {e}")))??;
+ 
+         Ok(Session::new(session))
+     }
+     /// Close the endpoint and all connections.
+     #[uniffi::method(default(code = 0, reason = ""))]
+     pub fn close(&self, code: u64, reason: String) -> Result<(), WebTransportError> {
+diff --git a/rs/web-transport-ffi/src/session.rs b/rs/web-transport-ffi/src/session.rs
+--- a/rs/web-transport-ffi/src/session.rs
++++ b/rs/web-transport-ffi/src/session.rs
+@@ -136,7 +136,41 @@ impl Session {
+             .close_reason()
+             .map(crate::error::map_session_error)
+     }
++
++    /// WebTransport subprotocol selected by the server, if any.
++    /// For MoQT draft-16 this should be `moqt-16`.
++    pub fn protocol(&self) -> Option<String> {
++        self.clone_handle.protocol().map(str::to_owned)
++    }
++
++    /// Browser-shaped close information after the session has terminated.
++    pub fn close_info(&self) -> SessionCloseInfo {
++        match self
++            .clone_handle
++            .close_reason()
++            .map(crate::error::map_session_error)
++        {
++            Some(crate::error::WebTransportError::SessionClosedByPeer { code, reason, .. }) => {
++                SessionCloseInfo {
++                    close_code: code.unwrap_or(0),
++                    reason,
++                }
++            }
++            Some(crate::error::WebTransportError::SessionClosedLocally) => SessionCloseInfo {
++                close_code: 0,
++                reason: String::new(),
++            },
++            Some(error) => SessionCloseInfo {
++                close_code: 0,
++                reason: error.to_string(),
++            },
++            None => SessionCloseInfo {
++                close_code: 0,
++                reason: String::new(),
++            },
++        }
++    }
+ 
+     /// Maximum payload size accepted by [`Self::send_datagram`].
+     pub fn max_datagram_size(&self) -> u64 {
+         self.clone_handle.max_datagram_size() as u64
+@@ -162,6 +196,13 @@ pub struct BiStream {
+     pub recv: Arc<RecvStream>,
+ }
+ 
++/// Close information returned to foreign-language WebTransport facades.
++#[derive(Debug, Clone, uniffi::Record)]
++pub struct SessionCloseInfo {
++    pub close_code: u64,
++    pub reason: String,
++}
++
+ /// IP address + port of a remote peer.
+ #[derive(Debug, Clone, uniffi::Record)]
+ pub struct RemoteAddress {

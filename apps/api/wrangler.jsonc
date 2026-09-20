@@ -1,0 +1,28 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "bleachers-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-15",
+  "workers_dev": true,
+  "vars": {
+    "CLOUDFLARE_ACCOUNT_ID": "21f3f2ebe046d7bdc276a57be3064355",
+    "MOQ_RELAY_ID": "ff3590aa021c413752b2cb92a6c7595e",
+    "MOQ_PROFILE": "cloudflare"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "bleachers-mvp",
+      "database_id": "da28d8d7-3729-48b8-8e38-d70e12ab4da1",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "GAME_STATE", "class_name": "GameState" }
+    ]
+  },
+  "exports": {
+    "GameState": { "type": "durable-object", "storage": "sqlite" }
+  }
+}

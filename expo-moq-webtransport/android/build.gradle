@@ -1,0 +1,24 @@
+apply plugin: 'com.android.library'
+apply plugin: 'expo-module-gradle-plugin'
+
+group = 'dev.puphr.expo.moqwebtransport'
+version = '0.1.0'
+
+android {
+  namespace "expo.modules.moqwebtransport"
+  defaultConfig {
+    minSdkVersion 24
+    versionCode 1
+    versionName "0.1.0"
+  }
+  sourceSets {
+    main {
+      jniLibs.srcDirs = ['src/main/jniLibs']
+    }
+  }
+}
+
+dependencies {
+  implementation 'net.java.dev.jna:jna:5.15.0@aar'
+  implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0'
+}

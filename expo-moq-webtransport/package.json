@@ -1,0 +1,35 @@
+{
+  "name": "expo-moq-webtransport",
+  "version": "0.1.0",
+  "description": "Native WebTransport bridge for Expo/React Native with MoQT draft-16 subprotocol negotiation",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "src",
+    "android",
+    "ios",
+    "expo-module.config.json",
+    "native-patch",
+    "native-publisher",
+    "scripts"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test:types": "tsc --noEmit -p tsconfig.test.json",
+    "native:android": "bash scripts/build-patched-ffi-android.sh",
+    "native:ios": "bash scripts/build-patched-ffi-ios.sh",
+    "test:runtime": "rm -rf .runtime-test && tsc -p tsconfig.runtime.json && mkdir -p .runtime-test/node_modules/expo-modules-core && printf '%s\\n' 'exports.requireNativeModule = () => { throw new Error(\"native module should not be loaded in mock test\"); };' > .runtime-test/node_modules/expo-modules-core/index.js && node .runtime-test/test/runtime.test.js",
+    "test": "npm run typecheck && npm run test:types && npm run test:runtime"
+  },
+  "peerDependencies": {
+    "expo": ">=53",
+    "expo-modules-core": ">=2",
+    "react-native": ">=0.78"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3"
+  },
+  "license": "MIT"
+}

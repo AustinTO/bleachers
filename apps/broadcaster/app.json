@@ -1,0 +1,41 @@
+{
+  "expo": {
+    "name": "Bleachers Broadcaster",
+    "slug": "bleachers-broadcaster",
+    "version": "1.0.0",
+    "orientation": "landscape",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow Bleachers to use your camera for a live soccer broadcast.",
+          "microphonePermission": "Allow Bleachers to use your microphone for a live soccer broadcast.",
+          "recordAudioAndroid": true,
+          "barcodeScannerEnabled": false
+        }
+      ]
+    ],
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#E6F4FE",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO"
+      ],
+      "package": "com.puphrstudio.bleachersbroadcaster"
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    }
+  }
+}

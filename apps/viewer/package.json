@@ -1,0 +1,25 @@
+{
+  "name": "@bleachers/viewer",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@moq/hang": "^0.4.3",
+    "@moq/publish": "^0.4.7",
+    "@moq/watch": "^0.5.4",
+    "@moqt/transport": "^0.5.7",
+    "@moqt/webtransport": "^0.5.7",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  },
+  "devDependencies": {
+    "@types/react": "~19.2.2",
+    "@types/react-dom": "~19.2.2",
+    "@vitejs/plugin-react": "^6.1.1",
+    "typescript": "~6.0.3",
+    "vite": "^8.3.0"
+  }
+}

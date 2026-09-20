@@ -1,0 +1,29 @@
+{
+  "name": "broadcaster",
+  "version": "1.0.0",
+  "main": "index.ts",
+  "dependencies": {
+    "@moqt/transport": "^0.5.7",
+    "@moqt/webtransport": "^0.5.7",
+    "expo": "~57.0.22",
+    "expo-camera": "~57.0.5",
+    "expo-keep-awake": "~57.0.2",
+    "expo-moq-webtransport": "file:../../expo-moq-webtransport",
+    "expo-status-bar": "~57.0.1",
+    "react": "19.2.3",
+    "react-native": "0.86.3"
+  },
+  "devDependencies": {
+    "@react-native-community/cli": "^20.2.0",
+    "@react-native/metro-config": "^0.86.3",
+    "@types/react": "~19.2.2",
+    "typescript": "~6.0.3"
+  },
+  "scripts": {
+    "start": "expo start",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "web": "expo start --web"
+  },
+  "private": true
+}
