@@ -422,6 +422,24 @@ function getViewerSessionId() {
   } catch { return crypto.randomUUID(); }
 }
 
+function OrganizerSetup() {
+  const [homeTeam, setHomeTeam] = useState('Tigers');
+  const [awayTeam, setAwayTeam] = useState('Eagles');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const createGame = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setBusy(true); setError('');
+    try {
+      const response = await fetch(`${API}/v1/games`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ homeTeam, awayTeam }) });
+      if (!response.ok) throw new Error('Game could not be created');
+      const payload = await response.json() as { game: { gameId: string } };
+      window.location.href = `/?game=${payload.game.gameId}`;
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'Game could not be created'); setBusy(false); }
+  };
+  return <main className="shell setup-shell"><header className="topbar"><span className="mark">BLEACHERS</span><span className="privacy">PRIVATE SETUP</span></header><section className="setup-card"><span className="tag">SOCCER GAME</span><h1>Create a private game</h1><p className="muted">The game link opens the no-account viewer. Team accounts and approvals are coming in the organizer-auth sprint.</p><form onSubmit={createGame}><label>Home team<input value={homeTeam} onChange={(event) => setHomeTeam(event.target.value)} required /></label><label>Away team<input value={awayTeam} onChange={(event) => setAwayTeam(event.target.value)} required /></label>{error ? <p className="error">{error}</p> : null}<button className="live-button" disabled={busy}>{busy ? 'CREATING…' : 'CREATE PRIVATE GAME'}</button></form></section></main>;
+}
+
 function App() {
   const gameId = params.get('game') ?? '';
   const isPublisher = location.pathname === '/publish' || params.get('mode') === 'publish';
@@ -497,7 +515,8 @@ function App() {
     }
   }, [game, gameId, viewerSessionId]);
 
-  if (!gameId) return <main className="shell empty"><span className="mark">BLEACHERS</span><h1>Private game link required.</h1><p>Open a link containing <code>?game=&lt;gameId&gt;</code>.</p></main>;
+  if (!gameId && params.get('mode') === 'setup') return <OrganizerSetup />;
+  if (!gameId) return <main className="shell empty"><span className="mark">BLEACHERS</span><h1>Private game link required.</h1><p>Open a link containing <code>?game=&lt;gameId&gt;</code> or use <code>?mode=setup</code>.</p></main>;
 
   return <main className="shell">
     <header className="topbar"><div><span className="mark">BLEACHERS</span><span className="live-label">{isPublisher ? 'PUBLISHER' : game?.status === 'live' ? 'LIVE' : game?.status === 'ended' ? 'POSTGAME' : 'WAITING FOR GAME'}</span></div><span className="privacy">PRIVATE GAME</span></header>

@@ -51,3 +51,16 @@ with a five-minute architectural ceiling.
 Catch Me Up, camera contribution, director mode, selective angle promotion, and
 archive reconciliation are sequenced extensions of the same invariant. They do
 not change the core model later.
+
+## Web deployment
+
+Netlify hosts the Vite viewer and future organizer/contributor web surfaces.
+Cloudflare Worker/D1/Durable Objects remain the control plane, and the browser
+connects directly to the capability-scoped MoQ relay for media. Netlify never
+proxies live video or audio.
+
+The first Netlify slice is intentionally operational: deploy the existing
+viewer, game links, event timeline, replay, Save Moment, mute control, and
+postgame state. Team creation, contributor approval, and director controls are
+subsequent website sprints backed by explicit Worker routes and authorization;
+they are not implied by static hosting alone.

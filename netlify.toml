@@ -1,0 +1,12 @@
+[build]
+  base = "apps/viewer"
+  command = "npm run build"
+  publish = "dist"
+
+[build.environment]
+  VITE_API_URL = "https://bleachers-api.austintaylorodell.workers.dev"
+
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

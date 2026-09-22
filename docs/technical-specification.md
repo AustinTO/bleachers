@@ -200,6 +200,38 @@ continuous high-bitrate upload from every device.
 
 ## 5. Repository and packages
 
+### Web deployment topology
+
+The viewer/control-plane web application is deployed to Netlify as a static
+Vite site. Netlify builds `apps/viewer` and injects the public
+`VITE_API_URL`; it does not proxy live media. Browser API calls go directly to
+the Cloudflare Worker, and browser MoQ/WebTransport sessions go directly to
+the capability-scoped Cloudflare relay endpoint.
+
+```text
+Netlify CDN/PWA
+   ├── HTTPS/JSON → Cloudflare Worker → D1 + Game Durable Object
+   └── WebTransport/MoQ ─────────────→ Cloudflare MoQ relay
+```
+
+The Netlify site may host organizer setup, game links, postgame timelines,
+contributor approval, and director controls as those web sprints land. It is a
+presentation/control client, not a media gateway. API CORS, signed capabilities,
+and private-link policy remain enforced by the Worker.
+
+Current deploy contract:
+
+```text
+base:    apps/viewer
+build:   npm run build
+publish: dist
+public:  VITE_API_URL=https://bleachers-api.austintaylorodell.workers.dev
+```
+
+The repository `netlify.toml` contains this configuration and an SPA fallback.
+Production deployment must apply pending D1 migrations and deploy the Worker
+before enabling UI features that depend on them.
+
 ```text
 apps/
   broadcaster/                 Expo shell; iOS/Android native modules
@@ -595,11 +627,13 @@ transport before S1.
 
 Team/game CRUD, organizer auth, opaque expiring links, Game Core DO state
 socket, scorekeeper join, one-phone score/clock/goal/save/highlight commands,
-event timeline with game timestamps, D1 durable projection/audit.
+event timeline with game timestamps, D1 durable projection/audit, and the first
+Netlify deployment of the viewer/control-plane shell.
 
 **Accept:** anonymous private link has current state in <3 s; two scorekeepers
 cannot create divergent state; event p95 propagation <500 ms; revoked link and
-cross-game requests fail.
+cross-game requests fail; Netlify production build reaches the Worker with the
+configured API origin while MoQ media remains a direct browser→relay path.
 
 ### Sprint 2 — Real broadcast (3 weeks)
 
@@ -672,6 +706,19 @@ event replay across main plus one alternate camera.
 viewer selects the angle → it remains preview quality; selection promotes it
 without interrupting main; one event resolves aligned replay locations on both
 cameras. This sprint is not a dependency for the first pilot.
+
+### Website follow-on backlog (after current MVP path)
+
+1. **Organizer setup:** authenticated team creation, team/game dashboard, game
+   link issuance, and lifecycle controls.
+2. **Contributor approval:** QR/private contribution request, organizer approve/
+   reject, camera capability issuance, and contribution health.
+3. **Director surface:** camera roster, selected presentation camera, preview
+   quality policy, and synchronized multi-angle event replay.
+
+These features require Worker authorization and D1/DO contracts first. A
+Netlify deploy alone does not make them available, and no website feature may
+proxy or wrap the working MoQ media session.
 
 ## 17. Sprint-0 parallel work packets
 
