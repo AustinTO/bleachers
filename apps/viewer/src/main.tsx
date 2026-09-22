@@ -11,6 +11,7 @@ type Game = { gameId: string; homeTeam: string; awayTeam: string; status: string
 type Capability = { relayUrl: string; broadcastName: string; capabilityIdentity?: unknown; profile?: string; draft?: string };
 type ObjectLocation = { groupId: bigint; objectId: bigint; timestampUs: number; keyframe: boolean };
 type BufferedFrame = { keyframe: boolean; timestampUs: number; receivedAtMs: number; payload: Uint8Array; groupId: bigint; objectId: bigint };
+type MediaState = 'connecting' | 'waiting' | 'live' | 'reconnecting' | 'degraded';
 const REWIND_US = 10_000_000;
 const BUFFER_US = 15_000_000;
 const EVENT_PREROLL_MS = 12_000;
@@ -35,6 +36,7 @@ function getCapability(gameId: string, role: 'publisher' | 'viewer') {
 function Draft16Camera({ relayUrl, broadcastName, capabilityIdentity, onRewindReady, replayActive, onReplayState, audioMuted }: { relayUrl: string; broadcastName: string; capabilityIdentity?: unknown; onRewindReady: (rewind: (event?: EventItem) => void) => void; replayActive: boolean; onReplayState: (active: boolean) => void; audioMuted: boolean }) {
   const [imageUrl, setImageUrl] = useState('');
   const [mediaError, setMediaError] = useState('');
+  const [mediaState, setMediaState] = useState<MediaState>('connecting');
   const previousUrl = useRef('');
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const replayCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -53,6 +55,7 @@ function Draft16Camera({ relayUrl, broadcastName, capabilityIdentity, onRewindRe
   const replayTimerRef = useRef<number | undefined>(undefined);
   const replayTelemetryRef = useRef<{ first?: number; last?: number; count: number }>({ count: 0 });
   const rawTimestampUsRef = useRef(0);
+  const lastVideoObjectAtRef = useRef(0);
   useEffect(() => {
     const unlockAudio = () => {
       const context = audioContextRef.current;
@@ -77,6 +80,7 @@ function Draft16Camera({ relayUrl, broadcastName, capabilityIdentity, onRewindRe
         let transport: WebTransport | undefined;
         let connection: MoqtConnection | undefined;
         try {
+          setMediaState('connecting');
           transport = new WebTransport(relayUrl, { protocols: ['moqt-16'] } as WebTransportOptions);
           const activeTransport = transport;
           closeActive = () => activeTransport.close();
@@ -87,6 +91,7 @@ function Draft16Camera({ relayUrl, broadcastName, capabilityIdentity, onRewindRe
           await connection.connect(transport);
           const parts = broadcastName.split('/');
           console.info('[bleachers:moq-track]', { gameId: parts[1]?.replace(/\.hang$/, ''), role: 'viewer', relayOrigin: new URL(relayUrl).origin, capabilityIdentity, broadcastName, namespace: [parts[0] || 'sports', parts[1] || broadcastName], trackName: 'media/main/video' });
+          setMediaState('waiting');
           setMediaError('Waiting for camera objects…');
           const subscription = await connection.subscribeTrack(
             [new TextEncoder().encode(parts[0] || 'sports'), new TextEncoder().encode(parts[1] || broadcastName)],
@@ -107,6 +112,8 @@ function Draft16Camera({ relayUrl, broadcastName, capabilityIdentity, onRewindRe
               const h264 = decodeH264Envelope(object.payload) ?? decodeRawH264(object.payload, rawTimestampUs);
               locationsRef.current.push({ groupId: object.groupId, objectId: object.objectId, timestampUs: h264?.timestampUs ?? Date.now() * 1000, keyframe: h264?.keyframe ?? false });
               if (h264) {
+                lastVideoObjectAtRef.current = Date.now();
+                setMediaState('live');
                 framesRef.current.push({ keyframe: h264.keyframe, timestampUs: h264.timestampUs, receivedAtMs: Date.now(), payload: h264.payload.slice(), groupId: object.groupId, objectId: object.objectId });
                 const cutoff = h264.timestampUs - BUFFER_US;
                 while (framesRef.current[0] && framesRef.current[0].timestampUs < cutoff) framesRef.current.shift();
@@ -219,6 +226,7 @@ function Draft16Camera({ relayUrl, broadcastName, capabilityIdentity, onRewindRe
           }
         } catch (cause) {
           if (cancelled) return;
+          setMediaState('reconnecting');
           console.info('[bleachers:moq-error]', JSON.stringify({ message: cause instanceof Error ? cause.message : String(cause), relayOrigin: (() => { try { return new URL(relayUrl).origin; } catch { return relayUrl; } })(), broadcastName }));
           setMediaError(cause instanceof Error ? cause.message : 'Draft-16 media connection failed');
           await new Promise((resolve) => setTimeout(resolve, 1500));
@@ -229,8 +237,13 @@ function Draft16Camera({ relayUrl, broadcastName, capabilityIdentity, onRewindRe
       }
     };
     void run();
+    const healthTimer = window.setInterval(() => {
+      if (cancelled || !lastVideoObjectAtRef.current) return;
+      if (Date.now() - lastVideoObjectAtRef.current > 2_500) setMediaState('degraded');
+    }, 1_000);
     return () => {
       cancelled = true;
+      window.clearInterval(healthTimer);
       closeActive?.();
       historicalCloseRef.current?.();
       if (replayTimerRef.current) window.clearTimeout(replayTimerRef.current);
@@ -243,7 +256,7 @@ function Draft16Camera({ relayUrl, broadcastName, capabilityIdentity, onRewindRe
     };
   }, [relayUrl, broadcastName, onRewindReady, onReplayState]);
   useEffect(() => { if (!replayActive) { historicalCloseRef.current?.(); historicalCloseRef.current = undefined; historicalActiveRef.current = false; closeDecoder(replayDecoderRef); replayQueueRef.current = []; replayBaseRef.current = undefined; replayTelemetryRef.current = { count: 0 }; if (replayTimerRef.current) window.clearTimeout(replayTimerRef.current); } }, [replayActive]);
-  return <div className="camera-stage">{imageUrl ? <img src={imageUrl} alt="Live camera" /> : <><canvas ref={canvasRef} style={{ display: !replayActive && mediaError.startsWith('LIVE H.264') ? 'block' : 'none', width: '100%', height: '100%', objectFit: 'contain' }} /><canvas ref={replayCanvasRef} style={{ display: replayActive ? 'block' : 'none', width: '100%', height: '100%', objectFit: 'contain' }} />{(!mediaError.startsWith('LIVE H.264') && !replayActive) ? <div className="video-placeholder"><div className="play-orb">▶</div><p>{mediaError || 'Connecting to draft-16 camera…'}</p></div> : null}</>}</div>;
+  return <div className="camera-stage"><span className={`media-health media-health-${mediaState}`}><span className="media-health-dot" />{mediaState === 'live' ? 'LIVE' : mediaState === 'degraded' ? 'VIDEO DELAYED' : mediaState === 'reconnecting' ? 'RECONNECTING' : mediaState === 'waiting' ? 'WAITING FOR CAMERA' : 'CONNECTING'}</span>{imageUrl ? <img src={imageUrl} alt="Live camera" /> : <><canvas ref={canvasRef} style={{ display: !replayActive && mediaError.startsWith('LIVE H.264') ? 'block' : 'none', width: '100%', height: '100%', objectFit: 'contain' }} /><canvas ref={replayCanvasRef} style={{ display: replayActive ? 'block' : 'none', width: '100%', height: '100%', objectFit: 'contain' }} />{(!mediaError.startsWith('LIVE H.264') && !replayActive) ? <div className="video-placeholder"><div className="play-orb">▶</div><p>{mediaError || 'Connecting to draft-16 camera…'}</p></div> : null}</>}</div>;
 }
 
 function closeDecoder(ref: { current: VideoDecoder | undefined }) {
