@@ -164,6 +164,24 @@ async function gameRoute(request: Request, env: Env, gameId: string, rest: strin
       return json({ game: await game.applyCommand({ kind: command.kind, team: command.team, running: command.running, clockSeconds: command.clockSeconds }) });
     } catch (cause) { return error(cause instanceof Error ? cause.message : 'command_failed', 409); }
   }
+  if (request.method === 'POST' && rest[0] === 'moments') {
+    const input = await body<{ eventId?: string; gameTimeSeconds?: number; viewerSessionId?: string }>(request);
+    const viewerSessionId = input?.viewerSessionId?.trim();
+    const gameTimeSeconds = input?.gameTimeSeconds;
+    if (!viewerSessionId || viewerSessionId.length > 128 || typeof gameTimeSeconds !== 'number' || !Number.isFinite(gameTimeSeconds) || gameTimeSeconds < 0) return error('invalid_moment', 400);
+    const eventId = input?.eventId?.trim() || null;
+    const saveId = id();
+    const createdAt = new Date().toISOString();
+    try {
+      await env.DB.prepare('INSERT INTO moment_saves (id, game_id, event_id, game_time_seconds, viewer_session_id, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+        .bind(saveId, resolvedGameId, eventId, Math.floor(gameTimeSeconds), viewerSessionId, createdAt).run();
+      return json({ saved: true, id: saveId, gameId: resolvedGameId, eventId, gameTimeSeconds: Math.floor(gameTimeSeconds), createdAt }, 201);
+    } catch (cause) {
+      // Duplicate saves from the same anonymous viewer are idempotent.
+      if (String(cause).toLowerCase().includes('unique')) return json({ saved: true, duplicate: true, gameId: resolvedGameId, eventId, gameTimeSeconds: Math.floor(gameTimeSeconds) });
+      return error('moment_save_failed', 500);
+    }
+  }
   return error('not_found', 404);
 }
 

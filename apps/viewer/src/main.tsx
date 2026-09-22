@@ -398,6 +398,17 @@ function h264Codec(annexB: Uint8Array) {
 const API = import.meta.env.VITE_API_URL ?? 'https://bleachers-api.austintaylorodell.workers.dev';
 const params = new URLSearchParams(location.search);
 
+function getViewerSessionId() {
+  const key = 'bleachers.viewer-session';
+  try {
+    const existing = localStorage.getItem(key);
+    if (existing) return existing;
+    const created = crypto.randomUUID();
+    localStorage.setItem(key, created);
+    return created;
+  } catch { return crypto.randomUUID(); }
+}
+
 function App() {
   const gameId = params.get('game') ?? '';
   const isPublisher = location.pathname === '/publish' || params.get('mode') === 'publish';
@@ -406,6 +417,7 @@ function App() {
   const [error, setError] = useState('');
   const [replaying, setReplaying] = useState<EventItem>();
   const [saved, setSaved] = useState<Set<string>>(new Set());
+  const [viewerSessionId] = useState(getViewerSessionId);
   const configuredRelayUrl = params.get('relay') ?? '';
   const [relayUrl, setRelayUrl] = useState(configuredRelayUrl && (configuredRelayUrl.startsWith('http://') || configuredRelayUrl.startsWith('https://')) ? configuredRelayUrl : configuredRelayUrl ? `https://${configuredRelayUrl}` : '');
   const [capabilityIdentity, setCapabilityIdentity] = useState<unknown>();
@@ -455,6 +467,23 @@ function App() {
     return `${Math.floor(seconds / 60).toString().padStart(2, '0')}:${(seconds % 60).toString().padStart(2, '0')}`;
   }, [game?.clockSeconds]);
 
+  const saveMoment = useCallback(async () => {
+    if (!game) return;
+    const gameTimeSeconds = Math.max(0, Math.floor(game.clockSeconds));
+    const saveKey = `live:${Math.floor(gameTimeSeconds / 5) * 5}`;
+    try {
+      const response = await fetch(`${API}/v1/games/${gameId}/moments`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ gameTimeSeconds, viewerSessionId, eventId: saveKey }),
+      });
+      if (!response.ok) throw new Error('Moment could not be saved');
+      setSaved((current) => new Set(current).add(saveKey));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Moment could not be saved');
+    }
+  }, [game, gameId, viewerSessionId]);
+
   if (!gameId) return <main className="shell empty"><span className="mark">BLEACHERS</span><h1>Private game link required.</h1><p>Open a link containing <code>?game=&lt;gameId&gt;</code>.</p></main>;
 
   return <main className="shell">
@@ -464,7 +493,7 @@ function App() {
       {relayUrl && broadcastName ? isPublisher ? <moq-publish-ui><moq-publish url={relayUrl} name={broadcastName} source="camera"><video muted autoPlay playsInline /></moq-publish></moq-publish-ui> : <Draft16Camera relayUrl={relayUrl} broadcastName={broadcastName} capabilityIdentity={capabilityIdentity} onRewindReady={registerRewind} replayActive={replayActive} onReplayState={handleReplayState} audioMuted={audioMuted} /> : <div className="video-placeholder"><div className="play-orb">▶</div><p>{isPublisher ? 'Requesting camera publishing capability…' : 'Requesting live viewing capability…'}</p></div>}
     </section>
     <section className="scoreboard"><div><span>{game?.homeTeam ?? 'HOME'}</span><strong>{game?.homeScore ?? '—'}</strong></div><div className="clock"><small>1ST HALF</small><strong>{clock}</strong></div><div><span>{game?.awayTeam ?? 'AWAY'}</span><strong>{game?.awayScore ?? '—'}</strong></div></section>
-    {!isPublisher ? <section className="actions"><button className="live-button" onClick={() => { setReplaying(undefined); setReplayActive(false); window.scrollTo({ top: 0, behavior: 'smooth' }); }}>● LIVE</button><button onClick={() => { rewind?.(); setReplaying(game?.events[0]); }}>↶ −10 SEC</button><button onClick={() => game?.events[0] && setSaved(new Set(saved).add(game.events[0].id))}>☆ SAVE MOMENT</button><button className={audioMuted ? 'muted-button' : ''} onClick={() => setAudioMuted((muted) => !muted)}>{audioMuted ? '🔇 UNMUTE' : '🔊 MUTE'}</button></section> : null}
+    {!isPublisher ? <section className="actions"><button className="live-button" onClick={() => { setReplaying(undefined); setReplayActive(false); window.scrollTo({ top: 0, behavior: 'smooth' }); }}>● LIVE</button><button onClick={() => { rewind?.(); setReplaying(game?.events[0]); }}>↶ −10 SEC</button><button onClick={() => void saveMoment()}>☆ SAVE MOMENT</button><button className={audioMuted ? 'muted-button' : ''} onClick={() => setAudioMuted((muted) => !muted)}>{audioMuted ? '🔇 UNMUTE' : '🔊 MUTE'}</button></section> : null}
     {replaying ? <section className="replay-card"><div><span className="tag">REPLAY</span><h2>{replaying.kind} · {formatClock(replaying.gameTimeSeconds)}</h2><p>Replay is selected while the live subscription stays active.</p></div><button onClick={() => setReplaying(undefined)}>RETURN TO LIVE</button></section> : null}
     <section className="timeline"><div className="timeline-head"><h2>Game events</h2><span>{saved.size} saved</span></div>{game?.events.length ? game.events.map((event) => <button className="event" key={event.id} onClick={() => { setReplaying(event); rewind?.(event); }}><span className="event-icon">{event.kind === 'GOAL' ? '⚽' : event.kind === 'HIGHLIGHT' ? '★' : '•'}</span><span><b>{event.kind}{event.team ? ` · ${event.team === 'home' ? game.homeTeam : game.awayTeam}` : ''}</b><small>{formatClock(event.gameTimeSeconds)}</small></span><span>›</span></button>) : <p className="muted">No events yet. Goals, saves, and highlights will appear here.</p>}</section>
   </main>;
