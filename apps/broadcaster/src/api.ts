@@ -41,6 +41,7 @@ export const api = {
     method: 'POST', body: JSON.stringify({ homeTeam, awayTeam }),
   })).game,
   startGame: async (gameId: string) => (await request<{ game: RemoteGame }>(`/v1/games/${gameId}/start`, { method: 'POST' })).game,
+  endGame: async (gameId: string) => (await request<{ game: RemoteGame }>(`/v1/games/${gameId}/end`, { method: 'POST' })).game,
   command: async (gameId: string, command: { kind: EventKind | 'CLOCK'; team?: TeamSide; running?: boolean; clockSeconds?: number }) =>
     (await request<{ game: RemoteGame }>(`/v1/games/${gameId}/commands`, { method: 'POST', body: JSON.stringify(command) })).game,
   mediaCapability: async (gameId: string, role: 'publisher' | 'viewer') =>

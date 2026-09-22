@@ -83,6 +83,14 @@ export class GameState extends DurableObject<Env> {
     return snapshot;
   }
 
+  async end(): Promise<GameSnapshot> {
+    const snapshot = this.requireSnapshot();
+    snapshot.status = 'ended';
+    snapshot.clockRunning = false;
+    await this.persist();
+    return snapshot;
+  }
+
   async applyCommand(command: { kind: EventKind | 'CLOCK'; team?: TeamSide; running?: boolean; clockSeconds?: number }): Promise<GameSnapshot> {
     const snapshot = this.requireSnapshot();
     if (snapshot.status !== 'live') throw new Error('game_not_live');
@@ -155,6 +163,11 @@ async function gameRoute(request: Request, env: Env, gameId: string, rest: strin
   if (request.method === 'POST' && rest[0] === 'start') {
     const snapshot = await game.start();
     await env.DB.prepare("UPDATE games SET status = 'live', started_at = COALESCE(started_at, ?) WHERE id = ?").bind(new Date().toISOString(), resolvedGameId).run();
+    return json({ game: { ...snapshot, homeTeam: row.home_team, awayTeam: row.away_team } });
+  }
+  if (request.method === 'POST' && rest[0] === 'end') {
+    const snapshot = await game.end();
+    await env.DB.prepare("UPDATE games SET status = 'ended', ended_at = COALESCE(ended_at, ?) WHERE id = ?").bind(new Date().toISOString(), resolvedGameId).run();
     return json({ game: { ...snapshot, homeTeam: row.home_team, awayTeam: row.away_team } });
   }
   if (request.method === 'POST' && rest[0] === 'commands') {

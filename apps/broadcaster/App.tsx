@@ -105,6 +105,7 @@ export default function App() {
     liveRef.current = false;
     moqSession.current?.close();
     moqSession.current = undefined;
+    if (gameId) await api.endGame(gameId).catch(() => undefined);
     setIsLive(false);
     setIsClockRunning(false);
   };
