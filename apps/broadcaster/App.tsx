@@ -26,6 +26,8 @@ export default function App() {
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [homeScore, setHomeScore] = useState(0);
   const [awayScore, setAwayScore] = useState(0);
+  const [homeTeam, setHomeTeam] = useState('Tigers');
+  const [awayTeam, setAwayTeam] = useState('Eagles');
   const [events, setEvents] = useState<GameEvent[]>([]);
   const [cameraReady, setCameraReady] = useState(false);
   const [gameId, setGameId] = useState<string>();
@@ -43,6 +45,8 @@ export default function App() {
   }, [isClockRunning]);
 
   const applyRemoteGame = (game: RemoteGame) => {
+    if (game.homeTeam) setHomeTeam(game.homeTeam);
+    if (game.awayTeam) setAwayTeam(game.awayTeam);
     setHomeScore(game.homeScore);
     setAwayScore(game.awayScore);
     setElapsedSeconds(game.clockSeconds);
@@ -148,16 +152,16 @@ export default function App() {
           <Pressable accessibilityLabel={isLive ? 'Toggle HUD' : 'Flip camera'} style={[styles.flipButton, isLive && styles.hudToggle]} onPress={() => isLive ? setHudVisible((visible) => !visible) : setFacing((value) => value === 'back' ? 'front' : 'back')}><Text style={isLive ? styles.hudLabel : styles.flipButtonText}>{isLive ? 'HUD' : '↻'}</Text></Pressable>
         </View>
         {(!isLive || hudVisible) && <View style={[styles.scoreboard, isLive && styles.liveScoreboard, { padding: 8, marginTop: 8, borderRadius: 10 }]}>
-          <View style={styles.teamScore}><Text style={styles.teamName}>TIGERS</Text><Text style={[styles.score, { fontSize: 34 }]}>{homeScore}</Text></View>
+          <View style={styles.teamScore}><Text style={styles.teamName}>{homeTeam.toUpperCase()}</Text><Text style={[styles.score, { fontSize: 34 }]}>{homeScore}</Text></View>
           <View style={styles.clockColumn}><Text style={styles.period}>1ST HALF</Text><Text style={[styles.clock, { fontSize: 22 }]}>{formatClock(elapsedSeconds)}</Text><Pressable onPress={() => setIsClockRunning((running) => !running)}><Text style={styles.clockAction}>{isClockRunning ? 'PAUSE CLOCK' : 'START CLOCK'}</Text></Pressable></View>
-          <View style={styles.teamScore}><Text style={styles.teamName}>EAGLES</Text><Text style={[styles.score, { fontSize: 34 }]}>{awayScore}</Text></View>
+          <View style={styles.teamScore}><Text style={styles.teamName}>{awayTeam.toUpperCase()}</Text><Text style={[styles.score, { fontSize: 34 }]}>{awayScore}</Text></View>
         </View>}
         <View style={styles.spacer} />
         {(!isLive || hudVisible) && <View style={[styles.controls, styles.liveControls]}>
           {!isLive && <TextInput accessibilityLabel="Existing game code" autoCapitalize="none" autoCorrect={false} placeholder="Existing game code (optional)" placeholderTextColor="#7EA28B" value={joinGameCode} onChangeText={setJoinGameCode} style={styles.gameCodeInput} />}
           <View style={styles.goalRow}>
-            <Pressable style={[styles.eventButton, styles.goalButton, isLive && styles.liveEventButton, { paddingVertical: 10, borderRadius: 10 }]} onPress={() => addGoal('home')}><Text style={[styles.eventButtonText, { fontSize: 17 }]}>GOAL</Text><Text style={styles.eventSubtext}>TIGERS</Text></Pressable>
-            <Pressable style={[styles.eventButton, styles.goalButton, isLive && styles.liveEventButton, { paddingVertical: 10, borderRadius: 10 }]} onPress={() => addGoal('away')}><Text style={[styles.eventButtonText, { fontSize: 17 }]}>GOAL</Text><Text style={styles.eventSubtext}>EAGLES</Text></Pressable>
+            <Pressable style={[styles.eventButton, styles.goalButton, isLive && styles.liveEventButton, { paddingVertical: 10, borderRadius: 10 }]} onPress={() => addGoal('home')}><Text style={[styles.eventButtonText, { fontSize: 17 }]}>GOAL</Text><Text style={styles.eventSubtext}>{homeTeam.toUpperCase()}</Text></Pressable>
+            <Pressable style={[styles.eventButton, styles.goalButton, isLive && styles.liveEventButton, { paddingVertical: 10, borderRadius: 10 }]} onPress={() => addGoal('away')}><Text style={[styles.eventButtonText, { fontSize: 17 }]}>GOAL</Text><Text style={styles.eventSubtext}>{awayTeam.toUpperCase()}</Text></Pressable>
           </View>
           <View style={styles.secondaryRow}><EventButton compact={isLive} label="SAVE" onPress={() => addEvent('SAVE')} /><EventButton compact={isLive} label="FOUL" onPress={() => addEvent('FOUL')} /><EventButton compact={isLive} label="HIGHLIGHT" onPress={() => addEvent('HIGHLIGHT')} /></View>
           <Pressable disabled={isSaving || isConnecting} style={[styles.liveButton, isLive && styles.endButton, (isSaving || isConnecting) && styles.disabledButton, { paddingVertical: 10, borderRadius: 10 }]} onPress={() => isLive ? endLive() : startLive()}><View style={[styles.liveDot, isLive && styles.liveDotOn]} /><Text style={[styles.liveButtonText, { fontSize: 12 }]}>{isConnecting ? 'CONNECTING…' : isSaving ? 'UPDATING GAME…' : isLive ? 'END LIVE' : 'START LIVE'}</Text></Pressable>
