@@ -37,6 +37,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  getGame: async (gameId: string) => (await request<{ game: RemoteGame }>(`/v1/games/${encodeURIComponent(gameId.trim())}`)).game,
   createGame: async (homeTeam: string, awayTeam: string) => (await request<{ game: RemoteGame }>('/v1/games', {
     method: 'POST', body: JSON.stringify({ homeTeam, awayTeam }),
   })).game,

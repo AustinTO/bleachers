@@ -2,7 +2,7 @@ import { CameraType, CameraView, useCameraPermissions } from 'expo-camera';
 import { StatusBar } from 'expo-status-bar';
 import { useKeepAwake } from 'expo-keep-awake';
 import { useEffect, useRef, useState } from 'react';
-import { Alert, PermissionsAndroid, Platform, Pressable, SafeAreaView, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Alert, PermissionsAndroid, Platform, Pressable, SafeAreaView, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { api, EventKind, RemoteGame, TeamSide } from './src/api';
 import { connectCloudflareMoq, PROBE, type CloudflareMoqSession } from './src/cloudflareMoq';
 import BleachersCamera, { BleachersCameraPreview } from './modules/bleachers-camera';
@@ -32,6 +32,7 @@ export default function App() {
   const [isSaving, setIsSaving] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   const [hudVisible, setHudVisible] = useState(true);
+  const [joinGameCode, setJoinGameCode] = useState('');
   const moqSession = useRef<CloudflareMoqSession | undefined>(undefined);
   const liveRef = useRef(false);
 
@@ -59,8 +60,15 @@ export default function App() {
     setIsConnecting(true);
     let started: RemoteGame;
     try {
-      const created = await api.createGame('Tigers', 'Eagles');
-      started = await api.startGame(created.gameId);
+      const existingCode = joinGameCode.trim();
+      if (existingCode) {
+        const existing = await api.getGame(existingCode);
+        if (existing.status === 'ended') throw new Error('That game has already ended. Create a new game or use another code.');
+        started = existing.status === 'live' ? existing : await api.startGame(existing.gameId);
+      } else {
+        const created = await api.createGame('Tigers', 'Eagles');
+        started = await api.startGame(created.gameId);
+      }
       setGameId(started.gameId);
       applyRemoteGame(started);
     } catch (cause) {
@@ -124,7 +132,7 @@ export default function App() {
       <StatusBar style="light" />
       <Text style={styles.eyebrow}>BLEACHERS</Text>
       <Text style={styles.permissionTitle}>Camera access lets you cover the game.</Text>
-      <Text style={styles.permissionCopy}>This Android build uses the rear camera for a real sideline preview. Live MoQ transport is intentionally still in the native transport spike.</Text>
+      <Text style={styles.permissionCopy}>Use a setup code to join an existing game, or leave it blank to create a new private game from this phone.</Text>
       <Pressable style={styles.primaryButton} onPress={requestPermission}><Text style={styles.primaryButtonText}>Allow camera</Text></Pressable>
     </SafeAreaView>
   );
@@ -146,6 +154,7 @@ export default function App() {
         </View>}
         <View style={styles.spacer} />
         {(!isLive || hudVisible) && <View style={[styles.controls, styles.liveControls]}>
+          {!isLive && <TextInput accessibilityLabel="Existing game code" autoCapitalize="none" autoCorrect={false} placeholder="Existing game code (optional)" placeholderTextColor="#7EA28B" value={joinGameCode} onChangeText={setJoinGameCode} style={styles.gameCodeInput} />}
           <View style={styles.goalRow}>
             <Pressable style={[styles.eventButton, styles.goalButton, isLive && styles.liveEventButton, { paddingVertical: 10, borderRadius: 10 }]} onPress={() => addGoal('home')}><Text style={[styles.eventButtonText, { fontSize: 17 }]}>GOAL</Text><Text style={styles.eventSubtext}>TIGERS</Text></Pressable>
             <Pressable style={[styles.eventButton, styles.goalButton, isLive && styles.liveEventButton, { paddingVertical: 10, borderRadius: 10 }]} onPress={() => addGoal('away')}><Text style={[styles.eventButtonText, { fontSize: 17 }]}>GOAL</Text><Text style={styles.eventSubtext}>EAGLES</Text></Pressable>
@@ -200,6 +209,7 @@ const styles = StyleSheet.create({
   flipButton: { backgroundColor: 'rgba(0,0,0,0.42)', borderRadius: 24, height: 48, width: 48, alignItems: 'center', justifyContent: 'center' }, hudToggle: { backgroundColor: 'rgba(0,0,0,0.72)', borderRadius: 8, height: 32, width: 52 }, hudLabel: { color: '#fff', fontSize: 11, fontWeight: '900', letterSpacing: 1 }, flipButtonText: { color: '#fff', fontSize: 30, lineHeight: 32 },
   scoreboard: { backgroundColor: 'rgba(3, 20, 15, 0.84)', borderRadius: 16, flexDirection: 'row', justifyContent: 'space-between', marginTop: 16, padding: 16 }, liveScoreboard: { alignSelf: 'center', borderRadius: 8, marginTop: 2, paddingHorizontal: 10, paddingVertical: 3, width: '42%' }, teamScore: { alignItems: 'center', minWidth: 70 }, teamName: { color: '#D5EADD', fontSize: 11, fontWeight: '800' }, score: { color: '#fff', fontSize: 44, fontVariant: ['tabular-nums'], fontWeight: '800', marginTop: 2 }, clockColumn: { alignItems: 'center' }, period: { color: '#A9D6BB', fontSize: 10, fontWeight: '800', letterSpacing: 1 }, clock: { color: '#fff', fontSize: 28, fontVariant: ['tabular-nums'], fontWeight: '800', marginTop: 4 }, clockAction: { color: '#8FF5AF', fontSize: 10, fontWeight: '800', marginTop: 4 },
   spacer: { flex: 1 }, controls: { gap: 9 }, liveControls: { alignSelf: 'center', gap: 4, marginBottom: 3, width: '88%' }, goalRow: { flexDirection: 'row', gap: 5 }, eventButton: { alignItems: 'center', borderRadius: 15, flex: 1, paddingVertical: 17 }, liveEventButton: { backgroundColor: 'rgba(249,184,58,0.76)', borderRadius: 8, paddingVertical: 6 }, goalButton: { backgroundColor: '#F9B83A' }, eventButtonText: { color: '#102117', fontSize: 22, fontWeight: '900' }, eventSubtext: { color: '#504015', fontSize: 10, fontWeight: '800', letterSpacing: 1, marginTop: 2 },
+  gameCodeInput: { alignSelf: 'center', backgroundColor: 'rgba(3, 20, 15, 0.78)', borderColor: 'rgba(211,255,224,0.35)', borderRadius: 8, borderWidth: 1, color: '#fff', fontSize: 12, paddingHorizontal: 12, paddingVertical: 8, width: '100%' },
   secondaryRow: { flexDirection: 'row', gap: 5 }, secondaryButton: { alignItems: 'center', backgroundColor: 'rgba(3, 26, 18, 0.72)', borderColor: 'rgba(211,255,224,0.35)', borderRadius: 8, borderWidth: 1, flex: 1, paddingVertical: 6 }, compactSecondaryButton: { paddingVertical: 6 }, secondaryButtonText: { color: '#fff', fontSize: 10, fontWeight: '800' }, compactSecondaryText: { fontSize: 9 },
   liveButton: { alignItems: 'center', backgroundColor: 'rgba(230,49,71,0.78)', borderRadius: 8, flexDirection: 'row', justifyContent: 'center', paddingVertical: 6 }, endButton: { backgroundColor: 'rgba(49,41,43,0.78)' }, disabledButton: { opacity: 0.6 }, liveDot: { backgroundColor: '#fff', borderRadius: 4, height: 8, marginRight: 5, width: 8 }, liveDotOn: { backgroundColor: '#FF5D6E' }, liveButtonText: { color: '#fff', fontSize: 10, fontWeight: '900', letterSpacing: 0.2 },
   eventFeed: { flexGrow: 0, maxHeight: 120, marginTop: 10 }, eventFeedContent: { paddingBottom: 6 }, emptyEvents: { color: 'rgba(255,255,255,0.75)', fontSize: 12, paddingVertical: 8, textAlign: 'center' }, eventLine: { backgroundColor: 'rgba(1, 11, 8, 0.72)', borderRadius: 8, flexDirection: 'row', justifyContent: 'space-between', marginBottom: 5, paddingHorizontal: 12, paddingVertical: 7 }, eventKind: { color: '#fff', fontSize: 11, fontWeight: '800' }, eventTime: { color: '#A9D6BB', fontSize: 11, fontVariant: ['tabular-nums'], fontWeight: '700' },

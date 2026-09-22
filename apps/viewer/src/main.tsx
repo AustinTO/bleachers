@@ -427,6 +427,7 @@ function OrganizerSetup() {
   const [awayTeam, setAwayTeam] = useState('Eagles');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [createdGame, setCreatedGame] = useState<string>();
   const createGame = async (event: React.FormEvent) => {
     event.preventDefault();
     setBusy(true); setError('');
@@ -434,10 +435,10 @@ function OrganizerSetup() {
       const response = await fetch(`${API}/v1/games`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ homeTeam, awayTeam }) });
       if (!response.ok) throw new Error('Game could not be created');
       const payload = await response.json() as { game: { gameId: string } };
-      window.location.href = `/?game=${payload.game.gameId}`;
+      setCreatedGame(payload.game.gameId);
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Game could not be created'); setBusy(false); }
   };
-  return <main className="shell setup-shell"><header className="topbar"><span className="mark">BLEACHERS</span><span className="privacy">PRIVATE SETUP</span></header><section className="setup-card"><span className="tag">SOCCER GAME</span><h1>Create a private game</h1><p className="muted">The game link opens the no-account viewer. Team accounts and approvals are coming in the organizer-auth sprint.</p><form onSubmit={createGame}><label>Home team<input value={homeTeam} onChange={(event) => setHomeTeam(event.target.value)} required /></label><label>Away team<input value={awayTeam} onChange={(event) => setAwayTeam(event.target.value)} required /></label>{error ? <p className="error">{error}</p> : null}<button className="live-button" disabled={busy}>{busy ? 'CREATING…' : 'CREATE PRIVATE GAME'}</button></form></section></main>;
+  return <main className="shell setup-shell"><header className="topbar"><span className="mark">BLEACHERS</span><span className="privacy">PRIVATE SETUP</span></header><section className="setup-card"><span className="tag">SOCCER GAME</span><h1>Create a private game</h1><p className="muted">Create the Game Core session first, then enter its short code in the broadcaster app so video and scoring attach to this game.</p>{createdGame ? <div className="created-game"><strong>{createdGame.slice(0, 6)}</strong><code>{location.origin}/?game={createdGame.slice(0, 6)}</code><button className="live-button" onClick={() => { window.location.href = `/?game=${createdGame.slice(0, 6)}`; }}>OPEN VIEWER</button><p className="muted">Broadcaster code: <b>{createdGame.slice(0, 6)}</b></p></div> : <form onSubmit={createGame}><label>Home team<input value={homeTeam} onChange={(event) => setHomeTeam(event.target.value)} required /></label><label>Away team<input value={awayTeam} onChange={(event) => setAwayTeam(event.target.value)} required /></label>{error ? <p className="error">{error}</p> : null}<button className="live-button" disabled={busy}>{busy ? 'CREATING…' : 'CREATE PRIVATE GAME'}</button></form>}</section></main>;
 }
 
 function App() {
