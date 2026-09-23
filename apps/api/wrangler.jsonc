@@ -17,6 +17,9 @@
       "migrations_dir": "migrations"
     }
   ],
+  "r2_buckets": [
+    { "binding": "MEDIA", "bucket_name": "bleachers-media" }
+  ],
   "durable_objects": {
     "bindings": [
       { "name": "GAME_STATE", "class_name": "GameState" }

@@ -2,11 +2,12 @@ import { CameraType, CameraView, useCameraPermissions } from 'expo-camera';
 import { StatusBar } from 'expo-status-bar';
 import { useKeepAwake } from 'expo-keep-awake';
 import { useEffect, useRef, useState } from 'react';
-import { Alert, PermissionsAndroid, Platform, Pressable, SafeAreaView, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
-import { api, EventKind, RemoteGame, TeamSide } from './src/api';
+import { Alert, PermissionsAndroid, Platform, Pressable, SafeAreaView, ScrollView, Share, StyleSheet, Text, TextInput, View } from 'react-native';
+import { api, EventKind, RemoteGame, TeamSide, getOrganizerSecret, setOrganizerSecret } from './src/api';
 import { connectCloudflareMoq, PROBE, type CloudflareMoqSession } from './src/cloudflareMoq';
 import BleachersCamera, { BleachersCameraPreview } from './modules/bleachers-camera';
 import { encodeAacFrame, encodeH264Frame } from './src/mediaEnvelope';
+import { VideoArchive } from './src/archive';
 
 type GameEventKind = EventKind;
 type GameEvent = { id: string; kind: GameEventKind; elapsedSeconds: number };
@@ -35,8 +36,22 @@ export default function App() {
   const [isConnecting, setIsConnecting] = useState(false);
   const [hudVisible, setHudVisible] = useState(true);
   const [joinGameCode, setJoinGameCode] = useState('');
+  const [joinOrganizerSecret, setJoinOrganizerSecret] = useState('');
+  const updateJoinGame = (value: string) => {
+    const pasted = value.trim();
+    if (/^https?:\/\//i.test(pasted)) {
+      try {
+        const link = new URL(pasted);
+        const game = link.searchParams.get('game');
+        const secret = new URLSearchParams(link.hash.slice(1)).get('secret');
+        if (game && secret) { setJoinGameCode(game); setJoinOrganizerSecret(secret); return; }
+      } catch { /* Allow editing an incomplete link. */ }
+    }
+    setJoinGameCode(value);
+  };
   const moqSession = useRef<CloudflareMoqSession | undefined>(undefined);
   const liveRef = useRef(false);
+  const archiveRef = useRef<VideoArchive | undefined>(undefined);
 
   useEffect(() => {
     if (!isClockRunning) return;
@@ -66,6 +81,8 @@ export default function App() {
     try {
       const existingCode = joinGameCode.trim();
       if (existingCode) {
+        if (!joinOrganizerSecret.trim()) throw new Error('Enter the organizer PIN to broadcast to an existing game.');
+        setOrganizerSecret(joinOrganizerSecret);
         const existing = await api.getGame(existingCode);
         if (existing.status === 'ended') throw new Error('That game has already ended. Create a new game or use another code.');
         started = existing.status === 'live' ? existing : await api.startGame(existing.gameId);
@@ -94,7 +111,8 @@ export default function App() {
       // hardware; Camera2 can recover rather than wedging the encoder.
       await BleachersCamera.start(1280, 720, 24, 1_200_000);
       await BleachersCamera.startAudio();
-      void pumpH264(moqSession.current, () => liveRef.current).catch((cause) => {
+      archiveRef.current = new VideoArchive(started.gameId, getOrganizerSecret());
+      void pumpH264(moqSession.current, () => liveRef.current, archiveRef.current).catch((cause) => {
         console.error('[bleachers:h264-pump-error]', cause instanceof Error ? cause.message : String(cause));
         liveRef.current = false;
         moqSession.current = undefined;
@@ -104,6 +122,8 @@ export default function App() {
       void pumpAac(moqSession.current, () => liveRef.current).catch((cause) => console.error('[bleachers:aac-pump-error]', cause instanceof Error ? cause.message : String(cause)));
     } catch (cause) {
       liveRef.current = false;
+      await archiveRef.current?.finish();
+      archiveRef.current = undefined;
       await BleachersCamera.stop().catch(() => undefined);
       moqSession.current?.close();
       moqSession.current = undefined;
@@ -115,11 +135,15 @@ export default function App() {
   const endLive = async () => {
     await BleachersCamera.stop().catch(() => undefined);
     liveRef.current = false;
+    setIsLive(false);
+    setIsSaving(true);
+    await archiveRef.current?.finish();
+    archiveRef.current = undefined;
     moqSession.current?.close();
     moqSession.current = undefined;
     if (gameId) await api.endGame(gameId).catch(() => undefined);
-    setIsLive(false);
     setIsClockRunning(false);
+    setIsSaving(false);
   };
   const addEvent = async (kind: GameEventKind, team?: TeamSide) => {
     if (!gameId || isSaving) return;
@@ -153,18 +177,20 @@ export default function App() {
         </View>
         {(!isLive || hudVisible) && <View style={[styles.scoreboard, isLive && styles.liveScoreboard, { padding: 8, marginTop: 8, borderRadius: 10 }]}>
           <View style={styles.teamScore}><Text style={styles.teamName}>{homeTeam.toUpperCase()}</Text><Text style={[styles.score, { fontSize: 34 }]}>{homeScore}</Text></View>
-          <View style={styles.clockColumn}><Text style={styles.period}>1ST HALF</Text><Text style={[styles.clock, { fontSize: 22 }]}>{formatClock(elapsedSeconds)}</Text><Pressable onPress={() => setIsClockRunning((running) => !running)}><Text style={styles.clockAction}>{isClockRunning ? 'PAUSE CLOCK' : 'START CLOCK'}</Text></Pressable></View>
+          <View style={styles.clockColumn}><Text style={styles.period}>1ST HALF</Text><Text style={[styles.clock, { fontSize: 22 }]}>{formatClock(elapsedSeconds)}</Text><Pressable onPress={() => { if (gameId) void api.command(gameId, { kind: 'CLOCK', running: !isClockRunning, clockSeconds: elapsedSeconds }).then(applyRemoteGame).catch(() => Alert.alert('Clock was not updated', 'Check your connection.')); else setIsClockRunning((running) => !running); }}><Text style={styles.clockAction}>{isClockRunning ? 'PAUSE CLOCK' : 'START CLOCK'}</Text></Pressable></View>
           <View style={styles.teamScore}><Text style={styles.teamName}>{awayTeam.toUpperCase()}</Text><Text style={[styles.score, { fontSize: 34 }]}>{awayScore}</Text></View>
         </View>}
         <View style={styles.spacer} />
         {(!isLive || hudVisible) && <View style={[styles.controls, styles.liveControls]}>
-          {!isLive && <TextInput accessibilityLabel="Existing game code" autoCapitalize="none" autoCorrect={false} placeholder="Existing game code (optional)" placeholderTextColor="#7EA28B" value={joinGameCode} onChangeText={setJoinGameCode} style={styles.gameCodeInput} />}
+          {!isLive && <TextInput accessibilityLabel="Game code or organizer link" autoCapitalize="none" autoCorrect={false} placeholder="Game code or organizer link" placeholderTextColor="#7EA28B" value={joinGameCode} onChangeText={updateJoinGame} style={styles.gameCodeInput} />}
+          {!isLive && !!joinGameCode.trim() && <TextInput accessibilityLabel="Organizer PIN" autoCapitalize="characters" autoCorrect={false} placeholder="Organizer PIN" placeholderTextColor="#7EA28B" value={joinOrganizerSecret} onChangeText={setJoinOrganizerSecret} style={styles.gameCodeInput} />}
           <View style={styles.goalRow}>
             <Pressable style={[styles.eventButton, styles.goalButton, isLive && styles.liveEventButton, { paddingVertical: 10, borderRadius: 10 }]} onPress={() => addGoal('home')}><Text style={[styles.eventButtonText, { fontSize: 17 }]}>GOAL</Text><Text style={styles.eventSubtext}>{homeTeam.toUpperCase()}</Text></Pressable>
             <Pressable style={[styles.eventButton, styles.goalButton, isLive && styles.liveEventButton, { paddingVertical: 10, borderRadius: 10 }]} onPress={() => addGoal('away')}><Text style={[styles.eventButtonText, { fontSize: 17 }]}>GOAL</Text><Text style={styles.eventSubtext}>{awayTeam.toUpperCase()}</Text></Pressable>
           </View>
           <View style={styles.secondaryRow}><EventButton compact={isLive} label="SAVE" onPress={() => addEvent('SAVE')} /><EventButton compact={isLive} label="FOUL" onPress={() => addEvent('FOUL')} /><EventButton compact={isLive} label="HIGHLIGHT" onPress={() => addEvent('HIGHLIGHT')} /></View>
           <Pressable disabled={isSaving || isConnecting} style={[styles.liveButton, isLive && styles.endButton, (isSaving || isConnecting) && styles.disabledButton, { paddingVertical: 10, borderRadius: 10 }]} onPress={() => isLive ? endLive() : startLive()}><View style={[styles.liveDot, isLive && styles.liveDotOn]} /><Text style={[styles.liveButtonText, { fontSize: 12 }]}>{isConnecting ? 'CONNECTING…' : isSaving ? 'UPDATING GAME…' : isLive ? 'END LIVE' : 'START LIVE'}</Text></Pressable>
+          {gameId && !!getOrganizerSecret() && <Pressable accessibilityLabel="Back up organizer access" onPress={() => void Share.share({ message: `Bleachers organizer access — keep private\nGame code: ${gameId.slice(0, 6)}\nOrganizer PIN: ${getOrganizerSecret()}` })}><Text style={styles.clockAction}>BACK UP ORGANIZER ACCESS</Text></Pressable>}
         </View>}
         {!isLive && <ScrollView style={styles.eventFeed} contentContainerStyle={styles.eventFeedContent}>
           {events.length === 0 ? <Text style={styles.emptyEvents}>Game events will appear here.</Text> : events.map((event) => <View key={event.id} style={styles.eventLine}><Text style={styles.eventKind}>{event.kind}</Text><Text style={styles.eventTime}>{formatClock(event.elapsedSeconds)}</Text></View>)}
@@ -174,20 +200,22 @@ export default function App() {
   );
 }
 
-async function pumpH264(session: CloudflareMoqSession, isStillLive: () => boolean) {
-  while (isStillLive()) {
+async function pumpH264(session: CloudflareMoqSession, isStillLive: () => boolean, archive?: VideoArchive) {
+  try { while (isStillLive()) {
     // Check relay health even when the camera queue is temporarily empty.
     // Otherwise a dead native session leaves the UI claiming LIVE forever
     // and viewers correctly receive Track not found.
     await session.check();
     const frame = await BleachersCamera.readFrame();
     if (!frame) { await new Promise<void>((resolve) => setTimeout(resolve, 5)); continue; }
+    const payload = encodeH264Frame(frame.payload, frame.timestampUs, frame.keyframe, frame.width, frame.height);
+    archive?.add(payload, frame.timestampUs, frame.keyframe);
     await session.sendObject({
-      payload: encodeH264Frame(frame.payload, frame.timestampUs, frame.keyframe, frame.width, frame.height),
+      payload,
       timestampUs: frame.timestampUs,
       keyframe: frame.keyframe,
     });
-  }
+  } } finally { await archive?.finish(); }
 }
 
 async function pumpAac(session: CloudflareMoqSession, isStillLive: () => boolean) {

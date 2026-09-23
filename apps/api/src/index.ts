@@ -2,6 +2,7 @@ import { DurableObject } from 'cloudflare:workers';
 
 export interface Env {
   DB: D1Database;
+  MEDIA: R2Bucket;
   GAME_STATE: DurableObjectNamespace<GameState>;
   CLOUDFLARE_ACCOUNT_ID: string;
   MOQ_RELAY_ID: string;
@@ -15,7 +16,7 @@ export interface Env {
 }
 
 type TeamSide = 'home' | 'away';
-type EventKind = 'GOAL' | 'SAVE' | 'FOUL' | 'HIGHLIGHT';
+type EventKind = 'GOAL' | 'SAVE' | 'FOUL' | 'HIGHLIGHT' | 'GOAL_CORRECTION';
 
 type GameEvent = {
   id: string;
@@ -33,6 +34,7 @@ type GameSnapshot = {
   awayScore: number;
   clockSeconds: number;
   clockRunning: boolean;
+  clockUpdatedAt?: number;
   sequence: number;
   events: GameEvent[];
 };
@@ -43,13 +45,27 @@ const cors = (response: Response) => {
   const headers = new Headers(response.headers);
   headers.set('access-control-allow-origin', '*');
   headers.set('access-control-allow-methods', 'GET,POST,OPTIONS');
-  headers.set('access-control-allow-headers', 'content-type');
+  headers.set('access-control-allow-headers', 'content-type, authorization, x-capture-start-ms, x-capture-end-ms');
   return new Response(response.body, { status: response.status, headers });
 };
 
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: JSON_HEADERS });
 const error = (code: string, status: number) => json({ error: code }, status);
 const id = () => crypto.randomUUID();
+const PIN_ALPHABET = '23456789ABCDEFGHJKMNPQRSTUVWXYZ';
+const organizerPin = () => {
+  const bytes = crypto.getRandomValues(new Uint8Array(8));
+  return Array.from(bytes, (byte) => PIN_ALPHABET[byte & 31]).join('');
+};
+function normalizeOrganizerSecret(value: string) {
+  const trimmed = value.trim();
+  const compact = trimmed.replace(/[-_\s]/g, '').toUpperCase();
+  return /^[2-9A-HJ-NP-Z]{8}$/.test(compact) ? compact : trimmed;
+}
+async function hashSecret(value: string) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(normalizeOrganizerSecret(value)));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
 
 async function body<T>(request: Request): Promise<T | null> {
   try { return await request.json<T>(); } catch { return null; }
@@ -67,16 +83,29 @@ export class GameState extends DurableObject<Env> {
 
   async create(gameId: string): Promise<GameSnapshot> {
     if (!this.snapshot) {
-      this.snapshot = { gameId, status: 'scheduled', homeScore: 0, awayScore: 0, clockSeconds: 0, clockRunning: false, sequence: 0, events: [] };
+      this.snapshot = { gameId, status: 'scheduled', homeScore: 0, awayScore: 0, clockSeconds: 0, clockRunning: false, clockUpdatedAt: Date.now(), sequence: 0, events: [] };
       await this.persist();
     }
     return this.snapshot;
   }
 
-  async getSnapshot(): Promise<GameSnapshot | undefined> { return this.snapshot; }
+  async getSnapshot(): Promise<GameSnapshot | undefined> {
+    if (!this.snapshot) return undefined;
+    const elapsed = this.snapshot.clockRunning ? Math.floor((Date.now() - (this.snapshot.clockUpdatedAt ?? Date.now())) / 1000) : 0;
+    return { ...this.snapshot, clockSeconds: this.snapshot.clockSeconds + Math.max(0, elapsed) };
+  }
+
+  private advanceClock() {
+    if (!this.snapshot) return;
+    const now = Date.now();
+    if (this.snapshot.clockRunning && this.snapshot.clockUpdatedAt) this.snapshot.clockSeconds += Math.max(0, Math.floor((now - this.snapshot.clockUpdatedAt) / 1000));
+    this.snapshot.clockUpdatedAt = now;
+  }
 
   async start(): Promise<GameSnapshot> {
     const snapshot = this.requireSnapshot();
+    if (snapshot.status !== 'scheduled') throw new Error('game_not_scheduled');
+    snapshot.clockUpdatedAt = Date.now();
     snapshot.status = 'live';
     snapshot.clockRunning = true;
     await this.persist();
@@ -85,6 +114,8 @@ export class GameState extends DurableObject<Env> {
 
   async end(): Promise<GameSnapshot> {
     const snapshot = this.requireSnapshot();
+    if (snapshot.status !== 'live') throw new Error('game_not_live');
+    this.advanceClock();
     snapshot.status = 'ended';
     snapshot.clockRunning = false;
     await this.persist();
@@ -94,17 +125,23 @@ export class GameState extends DurableObject<Env> {
   async applyCommand(command: { kind: EventKind | 'CLOCK'; team?: TeamSide; running?: boolean; clockSeconds?: number }): Promise<GameSnapshot> {
     const snapshot = this.requireSnapshot();
     if (snapshot.status !== 'live') throw new Error('game_not_live');
+    this.advanceClock();
 
     if (command.kind === 'CLOCK') {
       if (typeof command.running === 'boolean') snapshot.clockRunning = command.running;
-      if (typeof command.clockSeconds === 'number' && command.clockSeconds >= 0) snapshot.clockSeconds = Math.floor(command.clockSeconds);
+      if (typeof command.clockSeconds === 'number' && Number.isFinite(command.clockSeconds) && command.clockSeconds >= 0) snapshot.clockSeconds = Math.floor(command.clockSeconds);
       await this.persist();
       return snapshot;
     }
 
-    if (typeof command.clockSeconds === 'number' && command.clockSeconds >= 0) snapshot.clockSeconds = Math.floor(command.clockSeconds);
+    if (typeof command.clockSeconds === 'number' && Number.isFinite(command.clockSeconds) && command.clockSeconds >= 0) snapshot.clockSeconds = Math.floor(command.clockSeconds);
     if (command.kind === 'GOAL' && command.team === 'home') snapshot.homeScore += 1;
     if (command.kind === 'GOAL' && command.team === 'away') snapshot.awayScore += 1;
+    if (command.kind === 'GOAL_CORRECTION') {
+      if (command.team === 'home' && snapshot.homeScore > 0) snapshot.homeScore -= 1;
+      else if (command.team === 'away' && snapshot.awayScore > 0) snapshot.awayScore -= 1;
+      else throw new Error('score_cannot_be_reduced');
+    }
     snapshot.sequence += 1;
     const event: GameEvent = { id: id(), sequence: snapshot.sequence, kind: command.kind, team: command.team, gameTimeSeconds: snapshot.clockSeconds, createdAt: new Date().toISOString() };
     snapshot.events = [event, ...snapshot.events].slice(0, 100);
@@ -142,10 +179,11 @@ async function createGame(request: Request, env: Env) {
   const awayTeam = input?.awayTeam?.trim();
   if (!homeTeam || !awayTeam) return error('homeTeam_and_awayTeam_required', 400);
   const gameId = id();
+  const organizerSecret = organizerPin();
   const createdAt = new Date().toISOString();
-  await env.DB.prepare('INSERT INTO games (id, home_team, away_team, created_at) VALUES (?, ?, ?, ?)').bind(gameId, homeTeam, awayTeam, createdAt).run();
+  await env.DB.prepare('INSERT INTO games (id, home_team, away_team, created_at, organizer_secret_hash) VALUES (?, ?, ?, ?, ?)').bind(gameId, homeTeam, awayTeam, createdAt, await hashSecret(organizerSecret)).run();
   const game = await env.GAME_STATE.getByName(gameId).create(gameId);
-  return json({ game: { ...game, homeTeam, awayTeam, createdAt } }, 201);
+  return json({ game: { ...game, homeTeam, awayTeam, createdAt }, organizerSecret }, 201);
 }
 
 async function gameRoute(request: Request, env: Env, gameId: string, rest: string[]) {
@@ -153,47 +191,156 @@ async function gameRoute(request: Request, env: Env, gameId: string, rest: strin
   // The broadcaster displays a short game code. Accept it when it resolves to
   // one game; private production links should continue to use the full UUID.
   if (!row && gameId.length >= 6 && gameId.length < 36) {
-    row = await env.DB.prepare('SELECT id, home_team, away_team, status, created_at FROM games WHERE id LIKE ? LIMIT 1').bind(`${gameId}%`).first<{ id: string; home_team: string; away_team: string; status: string; created_at: string }>();
+    const matches = await env.DB.prepare('SELECT id, home_team, away_team, status, created_at FROM games WHERE id LIKE ? LIMIT 2').bind(`${gameId}%`).all<{ id: string; home_team: string; away_team: string; status: string; created_at: string }>();
+    if (matches.results.length > 1) return error('ambiguous_game_code', 409);
+    row = matches.results[0] ?? null;
   }
   if (!row) return error('game_not_found', 404);
   const resolvedGameId = row.id;
+  const capabilityInput = rest[0] === 'media-capability' ? await body<{ role?: string }>(request.clone()) : null;
+  const protectedAction = request.method === 'POST' && (['start', 'end', 'commands', 'media-segments'].includes(rest[0]) || rest[0] === 'media-capability' && capabilityInput?.role === 'publisher');
+  if (protectedAction) {
+    const stored = await env.DB.prepare('SELECT organizer_secret_hash FROM games WHERE id = ?').bind(resolvedGameId).first<{ organizer_secret_hash: string | null }>();
+    const supplied = request.headers.get('authorization')?.match(/^Bearer (.+)$/i)?.[1];
+    if (!supplied || !stored?.organizer_secret_hash || await hashSecret(supplied) !== stored.organizer_secret_hash) return error('organizer_authorization_required', 403);
+  }
   const game = env.GAME_STATE.getByName(resolvedGameId);
+  if (rest[0] === 'media-segments') return mediaSegmentRoute(request, env, resolvedGameId, rest);
   if (request.method === 'GET' && rest.length === 0) return json({ game: { ...(await game.getSnapshot()), homeTeam: row.home_team, awayTeam: row.away_team, createdAt: row.created_at } });
+  if (request.method === 'GET' && rest[0] === 'events') {
+    const records = await env.DB.prepare('SELECT payload_json FROM game_events WHERE game_id = ? ORDER BY sequence DESC LIMIT 1000').bind(resolvedGameId).all<{ payload_json: string }>();
+    return json({ events: records.results.map((record) => JSON.parse(record.payload_json) as GameEvent) });
+  }
   if (request.method === 'POST' && rest[0] === 'media-capability') return mintMediaCapability(request, env, resolvedGameId);
   if (request.method === 'POST' && rest[0] === 'start') {
-    const snapshot = await game.start();
+    let snapshot: GameSnapshot;
+    try { snapshot = await game.start(); } catch { return error('game_not_scheduled', 409); }
     await env.DB.prepare("UPDATE games SET status = 'live', started_at = COALESCE(started_at, ?) WHERE id = ?").bind(new Date().toISOString(), resolvedGameId).run();
     return json({ game: { ...snapshot, homeTeam: row.home_team, awayTeam: row.away_team } });
   }
   if (request.method === 'POST' && rest[0] === 'end') {
-    const snapshot = await game.end();
+    let snapshot: GameSnapshot;
+    try { snapshot = await game.end(); } catch { return error('game_not_live', 409); }
     await env.DB.prepare("UPDATE games SET status = 'ended', ended_at = COALESCE(ended_at, ?) WHERE id = ?").bind(new Date().toISOString(), resolvedGameId).run();
     return json({ game: { ...snapshot, homeTeam: row.home_team, awayTeam: row.away_team } });
   }
   if (request.method === 'POST' && rest[0] === 'commands') {
     const command = await body<{ kind?: EventKind | 'CLOCK'; team?: TeamSide; running?: boolean; clockSeconds?: number }>(request);
-    if (!command?.kind || !['GOAL', 'SAVE', 'FOUL', 'HIGHLIGHT', 'CLOCK'].includes(command.kind)) return error('invalid_command', 400);
+    if (!command?.kind || !['GOAL', 'SAVE', 'FOUL', 'HIGHLIGHT', 'GOAL_CORRECTION', 'CLOCK'].includes(command.kind)) return error('invalid_command', 400);
+    if (['GOAL', 'GOAL_CORRECTION'].includes(command.kind) && command.team !== 'home' && command.team !== 'away') return error('goal_team_required', 400);
+    if (command.clockSeconds !== undefined && (!Number.isFinite(command.clockSeconds) || command.clockSeconds < 0 || command.clockSeconds > 86400)) return error('invalid_clock', 400);
     try {
       return json({ game: await game.applyCommand({ kind: command.kind, team: command.team, running: command.running, clockSeconds: command.clockSeconds }) });
     } catch (cause) { return error(cause instanceof Error ? cause.message : 'command_failed', 409); }
   }
+  if (request.method === 'GET' && rest[0] === 'moments') {
+    const viewerSessionId = new URL(request.url).searchParams.get('viewerSessionId')?.trim();
+    if (!viewerSessionId || viewerSessionId.length > 128) return error('invalid_viewer_session', 400);
+    const records = await env.DB.prepare('SELECT m.id, m.event_id, m.game_time_seconds, m.created_at, COALESCE(m.media_at_ms, unixepoch(m.created_at) * 1000) AS media_at_ms, EXISTS (SELECT 1 FROM media_segments s WHERE s.game_id = m.game_id AND s.start_ms <= COALESCE(m.media_at_ms, unixepoch(m.created_at) * 1000) + 1000 AND s.end_ms >= COALESCE(m.media_at_ms, unixepoch(m.created_at) * 1000) - 1000) AS media_ready FROM moment_saves m WHERE m.game_id = ? AND m.viewer_session_id = ? ORDER BY m.created_at DESC LIMIT 100')
+      .bind(resolvedGameId, viewerSessionId).all<{ id: string; event_id: string | null; game_time_seconds: number; created_at: string; media_at_ms: number; media_ready: number }>();
+    return json({ moments: records.results });
+  }
   if (request.method === 'POST' && rest[0] === 'moments') {
-    const input = await body<{ eventId?: string; gameTimeSeconds?: number; viewerSessionId?: string }>(request);
+    const input = await body<{ eventId?: string; gameTimeSeconds?: number; viewerSessionId?: string; mediaAtMs?: number }>(request);
     const viewerSessionId = input?.viewerSessionId?.trim();
     const gameTimeSeconds = input?.gameTimeSeconds;
     if (!viewerSessionId || viewerSessionId.length > 128 || typeof gameTimeSeconds !== 'number' || !Number.isFinite(gameTimeSeconds) || gameTimeSeconds < 0) return error('invalid_moment', 400);
+    const mediaAtMs = input?.mediaAtMs ?? Date.now();
+    if (!Number.isSafeInteger(mediaAtMs) || mediaAtMs < Date.parse(row.created_at) - 10_000 || mediaAtMs > Date.now() + 5_000) return error('invalid_media_time', 400);
     const eventId = input?.eventId?.trim() || null;
     const saveId = id();
     const createdAt = new Date().toISOString();
     try {
-      await env.DB.prepare('INSERT INTO moment_saves (id, game_id, event_id, game_time_seconds, viewer_session_id, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-        .bind(saveId, resolvedGameId, eventId, Math.floor(gameTimeSeconds), viewerSessionId, createdAt).run();
-      return json({ saved: true, id: saveId, gameId: resolvedGameId, eventId, gameTimeSeconds: Math.floor(gameTimeSeconds), createdAt }, 201);
+      await env.DB.prepare('INSERT INTO moment_saves (id, game_id, event_id, game_time_seconds, viewer_session_id, created_at, media_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .bind(saveId, resolvedGameId, eventId, Math.floor(gameTimeSeconds), viewerSessionId, createdAt, mediaAtMs).run();
+      return json({ saved: true, id: saveId, gameId: resolvedGameId, eventId, gameTimeSeconds: Math.floor(gameTimeSeconds), createdAt, mediaAtMs }, 201);
     } catch (cause) {
       // Duplicate saves from the same anonymous viewer are idempotent.
-      if (String(cause).toLowerCase().includes('unique')) return json({ saved: true, duplicate: true, gameId: resolvedGameId, eventId, gameTimeSeconds: Math.floor(gameTimeSeconds) });
+      if (String(cause).toLowerCase().includes('unique')) {
+        const saved = await env.DB.prepare('SELECT id, created_at, media_at_ms FROM moment_saves WHERE game_id = ? AND viewer_session_id = ? AND event_id = ?')
+          .bind(resolvedGameId, viewerSessionId, eventId).first<{ id: string; created_at: string; media_at_ms: number | null }>();
+        if (saved) return json({ saved: true, duplicate: true, id: saved.id, gameId: resolvedGameId, eventId, gameTimeSeconds: Math.floor(gameTimeSeconds), createdAt: saved.created_at, mediaAtMs: saved.media_at_ms ?? Date.parse(saved.created_at) });
+      }
       return error('moment_save_failed', 500);
     }
+  }
+  return error('not_found', 404);
+}
+
+const MAX_SEGMENT_BYTES = 4 * 1024 * 1024;
+type MediaSegmentRow = { id: string; start_ms: number; end_ms: number; r2_key: string; size_bytes: number };
+
+function validSegmentPayload(bytes: Uint8Array): boolean {
+  let offset = 0;
+  let frames = 0;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  while (offset + 8 <= bytes.length) {
+    const length = view.getUint32(offset, false);
+    offset += 4;
+    if (length < 18 || length > bytes.length - offset) return false;
+    if (String.fromCharCode(...bytes.subarray(offset, offset + 4)) !== 'BLC1') return false;
+    if (frames === 0 && bytes[offset + 4] !== 1) return false;
+    offset += length;
+    frames++;
+  }
+  return frames > 0 && offset === bytes.length;
+}
+
+async function mediaSegmentRoute(request: Request, env: Env, gameId: string, rest: string[]): Promise<Response> {
+  const url = new URL(request.url);
+  if (request.method === 'POST' && rest.length === 1) {
+    const startMs = Number(request.headers.get('x-capture-start-ms'));
+    const endMs = Number(request.headers.get('x-capture-end-ms'));
+    const now = Date.now();
+    if (request.headers.get('content-type')?.split(';')[0].trim().toLowerCase() !== 'application/octet-stream') return error('invalid_media_type', 415);
+    if (!request.headers.has('x-capture-start-ms') || !request.headers.has('x-capture-end-ms') || !Number.isSafeInteger(startMs) || !Number.isSafeInteger(endMs) || endMs < startMs || endMs - startMs > 60_000 || startMs < now - 86_400_000 || endMs > now + 120_000) return error('invalid_capture_time', 400);
+    const declaredSize = Number(request.headers.get('content-length'));
+    if (Number.isFinite(declaredSize) && declaredSize > MAX_SEGMENT_BYTES) return error('media_segment_too_large', 413);
+    const reader = request.body?.getReader();
+    if (!reader) return error('invalid_media_segment', 400);
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > MAX_SEGMENT_BYTES) {
+        await reader.cancel();
+        return error('media_segment_too_large', 413);
+      }
+      chunks.push(value);
+    }
+    const bytes = new Uint8Array(size);
+    let cursor = 0;
+    for (const chunk of chunks) { bytes.set(chunk, cursor); cursor += chunk.byteLength; }
+    if (!validSegmentPayload(bytes)) return error('invalid_media_segment', 400);
+    const segmentId = id();
+    const key = `games/${gameId}/segments/${segmentId}.bin`;
+    await env.MEDIA.put(key, bytes, { httpMetadata: { contentType: 'application/octet-stream' } });
+    try {
+      await env.DB.prepare('INSERT INTO media_segments (id, game_id, start_ms, end_ms, r2_key, size_bytes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .bind(segmentId, gameId, startMs, endMs, key, bytes.length, new Date().toISOString()).run();
+    } catch (cause) {
+      await env.MEDIA.delete(key);
+      throw cause;
+    }
+    return json({ segment: { id: segmentId, startMs, endMs, url: `/v1/games/${gameId}/media-segments/${segmentId}` } }, 201);
+  }
+  if (request.method === 'GET' && rest.length === 1) {
+    const from = Number(url.searchParams.get('from'));
+    const to = Number(url.searchParams.get('to'));
+    if (!url.searchParams.has('from') || !url.searchParams.has('to') || !Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from < 0 || to < from || to - from > 86_400_000) return error('invalid_time_range', 400);
+    const records = await env.DB.prepare('SELECT id, start_ms, end_ms, r2_key, size_bytes FROM media_segments WHERE game_id = ? AND end_ms >= ? AND start_ms <= ? ORDER BY start_ms ASC LIMIT 500')
+      .bind(gameId, from, to).all<MediaSegmentRow>();
+    return json({ segments: records.results.map((segment) => ({ id: segment.id, startMs: segment.start_ms, endMs: segment.end_ms, url: `/v1/games/${gameId}/media-segments/${segment.id}` })) });
+  }
+  if (request.method === 'GET' && rest.length === 2) {
+    const segment = await env.DB.prepare('SELECT id, start_ms, end_ms, r2_key, size_bytes FROM media_segments WHERE game_id = ? AND id = ?')
+      .bind(gameId, rest[1]).first<MediaSegmentRow>();
+    if (!segment) return error('media_segment_not_found', 404);
+    const object = await env.MEDIA.get(segment.r2_key);
+    if (!object) return error('media_segment_not_found', 404);
+    return new Response(object.body, { headers: { 'content-type': 'application/octet-stream', 'cache-control': 'private, max-age=60' } });
   }
   return error('not_found', 404);
 }

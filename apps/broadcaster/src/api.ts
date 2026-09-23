@@ -26,11 +26,14 @@ export type RemoteGame = {
 export type MediaCapability = { relayUrl: string; broadcastName: string; expires: string; profile?: string; draft?: string; capabilityIdentity?: unknown };
 
 const baseUrl = process.env.EXPO_PUBLIC_API_URL ?? 'https://bleachers-api.austintaylorodell.workers.dev';
+let organizerSecret = '';
+export const setOrganizerSecret = (secret: string) => { organizerSecret = secret.trim(); };
+export const getOrganizerSecret = () => organizerSecret;
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${baseUrl}${path}`, {
     ...init,
-    headers: { 'content-type': 'application/json', ...init?.headers },
+    headers: { 'content-type': 'application/json', ...(organizerSecret ? { authorization: `Bearer ${organizerSecret}` } : {}), ...init?.headers },
   });
   if (!response.ok) throw new Error(`Server request failed (${response.status})`);
   return (await response.json()) as T;
@@ -38,9 +41,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   getGame: async (gameId: string) => (await request<{ game: RemoteGame }>(`/v1/games/${encodeURIComponent(gameId.trim())}`)).game,
-  createGame: async (homeTeam: string, awayTeam: string) => (await request<{ game: RemoteGame }>('/v1/games', {
-    method: 'POST', body: JSON.stringify({ homeTeam, awayTeam }),
-  })).game,
+  createGame: async (homeTeam: string, awayTeam: string) => {
+    const result = await request<{ game: RemoteGame; organizerSecret: string }>('/v1/games', { method: 'POST', body: JSON.stringify({ homeTeam, awayTeam }) });
+    setOrganizerSecret(result.organizerSecret);
+    return result.game;
+  },
   startGame: async (gameId: string) => (await request<{ game: RemoteGame }>(`/v1/games/${gameId}/start`, { method: 'POST' })).game,
   endGame: async (gameId: string) => (await request<{ game: RemoteGame }>(`/v1/games/${gameId}/end`, { method: 'POST' })).game,
   command: async (gameId: string, command: { kind: EventKind | 'CLOCK'; team?: TeamSide; running?: boolean; clockSeconds?: number }) =>

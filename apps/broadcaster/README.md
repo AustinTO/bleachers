@@ -18,6 +18,9 @@ the short-lived publisher capability at game start; do not place relay tokens
 in the application bundle. A goal/save/highlight action belongs to the same
 monotonic game timeline as encoded media, allowing event replay without making
 a clip first.
+The broadcaster also uploads bounded, keyframe-aligned H.264 segments to the
+API's R2 archive in a separate queue. Archive upload failures do not stop live
+MoQ publishing. Archived replay currently contains video only.
 
 ## Run on Android
 
@@ -32,3 +35,11 @@ Expo Go cannot contain the local `MoqNative` module.
 
 The assembled debug APK is at
 `android/app/build/outputs/apk/debug/app-debug.apk`.
+
+# Organizer recovery
+
+When the broadcaster creates a game, use **Back Up Organizer Access** to save
+the game code and organizer PIN privately. They are needed to rejoin that game
+after the app restarts. The PIN is eight characters and can be typed on the
+phone; the broadcaster also accepts a full organizer link pasted into the game
+field.

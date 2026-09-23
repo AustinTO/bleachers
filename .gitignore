@@ -14,6 +14,7 @@ node_modules/
 .git.nested-backup/
 .git.readonly-backup/
 .omx/
+.netlify/
 .git.empty-backup/
 *.log
 .DS_Store
