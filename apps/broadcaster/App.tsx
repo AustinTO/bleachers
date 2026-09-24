@@ -35,6 +35,8 @@ export default function App() {
   const [isSaving, setIsSaving] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   const [hudVisible, setHudVisible] = useState(true);
+  const [hudVisible, setHudVisible] = useState(true);
+  const [setupMode, setSetupMode] = useState<'create' | 'join'>('create');
   const [joinGameCode, setJoinGameCode] = useState('');
   const [joinOrganizerSecret, setJoinOrganizerSecret] = useState('');
   const updateJoinGame = (value: string) => {
@@ -79,8 +81,7 @@ export default function App() {
     setIsConnecting(true);
     let started: RemoteGame;
     try {
-      const existingCode = joinGameCode.trim();
-      if (existingCode) {
+      if (setupMode === 'join' && existingCode) {
         if (!joinOrganizerSecret.trim()) throw new Error('Enter the organizer PIN to broadcast to an existing game.');
         setOrganizerSecret(joinOrganizerSecret);
         const existing = await api.getGame(existingCode);
@@ -183,15 +184,26 @@ export default function App() {
         </View>}
         <View style={styles.spacer} />
         {(!isLive || hudVisible) && <View style={[styles.controls, styles.liveControls]}>
-          {!isLive && <TextInput accessibilityLabel="Game code or organizer link" autoCapitalize="none" autoCorrect={false} placeholder="Game code or organizer link" placeholderTextColor="#7EA28B" value={joinGameCode} onChangeText={updateJoinGame} style={styles.gameCodeInput} />}
-          {!isLive && !!joinGameCode.trim() && <TextInput accessibilityLabel="Organizer PIN" autoCapitalize="characters" autoCorrect={false} placeholder="Organizer PIN" placeholderTextColor="#7EA28B" value={joinOrganizerSecret} onChangeText={setJoinOrganizerSecret} style={styles.gameCodeInput} />}
-          {!isLive && !joinGameCode.trim() && (
-            <View style={{ flexDirection: 'row', gap: 5 }}>
-              <TextInput accessibilityLabel="Home team" placeholder="Home team" placeholderTextColor="#7EA28B" value={homeTeam} onChangeText={setHomeTeam} style={[styles.gameCodeInput, { flex: 1 }]} />
-              <TextInput accessibilityLabel="Away team" placeholder="Away team" placeholderTextColor="#7EA28B" value={awayTeam} onChangeText={setAwayTeam} style={[styles.gameCodeInput, { flex: 1 }]} />
+          {!isLive && (
+            <View style={styles.setupCard}>
+              <View style={styles.setupTabs}>
+                <Pressable onPress={() => setSetupMode('create')} style={[styles.setupTab, setupMode === 'create' && styles.setupTabActive]}><Text style={[styles.setupTabText, setupMode === 'create' && styles.setupTabTextActive]}>NEW GAME</Text></Pressable>
+                <Pressable onPress={() => setSetupMode('join')} style={[styles.setupTab, setupMode === 'join' && styles.setupTabActive]}><Text style={[styles.setupTabText, setupMode === 'join' && styles.setupTabTextActive]}>JOIN GAME</Text></Pressable>
+              </View>
+              {setupMode === 'create' ? (
+                <View style={styles.setupForm}>
+                  <TextInput accessibilityLabel="Home team" placeholder="Home Team Name" placeholderTextColor="#7EA28B" value={homeTeam} onChangeText={setHomeTeam} style={styles.gameCodeInput} />
+                  <TextInput accessibilityLabel="Away team" placeholder="Away Team Name" placeholderTextColor="#7EA28B" value={awayTeam} onChangeText={setAwayTeam} style={styles.gameCodeInput} />
+                </View>
+              ) : (
+                <View style={styles.setupForm}>
+                  <TextInput accessibilityLabel="Game code or organizer link" autoCapitalize="none" autoCorrect={false} placeholder="Game Code or Link" placeholderTextColor="#7EA28B" value={joinGameCode} onChangeText={updateJoinGame} style={styles.gameCodeInput} />
+                  <TextInput accessibilityLabel="Organizer PIN" autoCapitalize="characters" autoCorrect={false} placeholder="Organizer PIN" placeholderTextColor="#7EA28B" value={joinOrganizerSecret} onChangeText={setJoinOrganizerSecret} style={styles.gameCodeInput} />
+                </View>
+              )}
             </View>
           )}
-          <View style={styles.goalRow}>
+          <View style={[styles.goalRow, !isLive && { marginTop: 12 }]}>
             <Pressable style={[styles.eventButton, styles.goalButton, isLive && styles.liveEventButton, { paddingVertical: 10, borderRadius: 10 }]} onPress={() => addGoal('home')}><Text style={[styles.eventButtonText, { fontSize: 17 }]}>GOAL</Text><Text style={styles.eventSubtext}>{homeTeam.toUpperCase()}</Text></Pressable>
             <Pressable style={[styles.eventButton, styles.goalButton, isLive && styles.liveEventButton, { paddingVertical: 10, borderRadius: 10 }]} onPress={() => addGoal('away')}><Text style={[styles.eventButtonText, { fontSize: 17 }]}>GOAL</Text><Text style={styles.eventSubtext}>{awayTeam.toUpperCase()}</Text></Pressable>
           </View>
@@ -250,7 +262,8 @@ const styles = StyleSheet.create({
   flipButton: { backgroundColor: 'rgba(0,0,0,0.42)', borderRadius: 24, height: 48, width: 48, alignItems: 'center', justifyContent: 'center' }, hudToggle: { backgroundColor: 'rgba(0,0,0,0.72)', borderRadius: 8, height: 32, width: 52 }, hudLabel: { color: '#fff', fontSize: 11, fontWeight: '900', letterSpacing: 1 }, flipButtonText: { color: '#fff', fontSize: 30, lineHeight: 32 },
   scoreboard: { backgroundColor: 'rgba(3, 20, 15, 0.84)', borderRadius: 16, flexDirection: 'row', justifyContent: 'space-between', marginTop: 16, padding: 16 }, liveScoreboard: { alignSelf: 'center', borderRadius: 8, marginTop: 2, paddingHorizontal: 10, paddingVertical: 3, width: '42%' }, teamScore: { alignItems: 'center', minWidth: 70 }, teamName: { color: '#D5EADD', fontSize: 11, fontWeight: '800' }, score: { color: '#fff', fontSize: 44, fontVariant: ['tabular-nums'], fontWeight: '800', marginTop: 2 }, clockColumn: { alignItems: 'center' }, period: { color: '#A9D6BB', fontSize: 10, fontWeight: '800', letterSpacing: 1 }, clock: { color: '#fff', fontSize: 28, fontVariant: ['tabular-nums'], fontWeight: '800', marginTop: 4 }, clockAction: { color: '#8FF5AF', fontSize: 10, fontWeight: '800', marginTop: 4 },
   spacer: { flex: 1 }, controls: { gap: 9 }, liveControls: { alignSelf: 'center', gap: 4, marginBottom: 3, width: '88%' }, goalRow: { flexDirection: 'row', gap: 5 }, eventButton: { alignItems: 'center', borderRadius: 15, flex: 1, paddingVertical: 17 }, liveEventButton: { backgroundColor: 'rgba(249,184,58,0.76)', borderRadius: 8, paddingVertical: 6 }, goalButton: { backgroundColor: '#F9B83A' }, eventButtonText: { color: '#102117', fontSize: 22, fontWeight: '900' }, eventSubtext: { color: '#504015', fontSize: 10, fontWeight: '800', letterSpacing: 1, marginTop: 2 },
-  gameCodeInput: { alignSelf: 'center', backgroundColor: 'rgba(3, 20, 15, 0.78)', borderColor: 'rgba(211,255,224,0.35)', borderRadius: 8, borderWidth: 1, color: '#fff', fontSize: 12, paddingHorizontal: 12, paddingVertical: 8, width: '100%' },
+  setupCard: { backgroundColor: 'rgba(3, 20, 15, 0.84)', borderRadius: 16, padding: 16, marginTop: -20 }, setupTabs: { flexDirection: 'row', backgroundColor: 'rgba(0,0,0,0.3)', borderRadius: 8, padding: 4, marginBottom: 16 }, setupTab: { flex: 1, paddingVertical: 10, alignItems: 'center', borderRadius: 6 }, setupTabActive: { backgroundColor: 'rgba(143,245,175,0.15)' }, setupTabText: { color: '#7EA28B', fontSize: 12, fontWeight: '800', letterSpacing: 0.5 }, setupTabTextActive: { color: '#8FF5AF' }, setupForm: { gap: 10 },
+  gameCodeInput: { alignSelf: 'stretch', backgroundColor: 'rgba(3, 26, 18, 0.72)', borderColor: 'rgba(211,255,224,0.15)', borderRadius: 10, borderWidth: 1, color: '#fff', fontSize: 16, paddingHorizontal: 16, paddingVertical: 14, width: '100%', fontWeight: '600' },
   secondaryRow: { flexDirection: 'row', gap: 5 }, secondaryButton: { alignItems: 'center', backgroundColor: 'rgba(3, 26, 18, 0.72)', borderColor: 'rgba(211,255,224,0.35)', borderRadius: 8, borderWidth: 1, flex: 1, paddingVertical: 6 }, compactSecondaryButton: { paddingVertical: 6 }, secondaryButtonText: { color: '#fff', fontSize: 10, fontWeight: '800' }, compactSecondaryText: { fontSize: 9 },
   liveButton: { alignItems: 'center', backgroundColor: 'rgba(230,49,71,0.78)', borderRadius: 8, flexDirection: 'row', justifyContent: 'center', paddingVertical: 6 }, endButton: { backgroundColor: 'rgba(49,41,43,0.78)' }, disabledButton: { opacity: 0.6 }, liveDot: { backgroundColor: '#fff', borderRadius: 4, height: 8, marginRight: 5, width: 8 }, liveDotOn: { backgroundColor: '#FF5D6E' }, liveButtonText: { color: '#fff', fontSize: 10, fontWeight: '900', letterSpacing: 0.2 },
   eventFeed: { flexGrow: 0, maxHeight: 120, marginTop: 10 }, eventFeedContent: { paddingBottom: 6 }, emptyEvents: { color: 'rgba(255,255,255,0.75)', fontSize: 12, paddingVertical: 8, textAlign: 'center' }, eventLine: { backgroundColor: 'rgba(1, 11, 8, 0.72)', borderRadius: 8, flexDirection: 'row', justifyContent: 'space-between', marginBottom: 5, paddingHorizontal: 12, paddingVertical: 7 }, eventKind: { color: '#fff', fontSize: 11, fontWeight: '800' }, eventTime: { color: '#A9D6BB', fontSize: 11, fontVariant: ['tabular-nums'], fontWeight: '700' },
