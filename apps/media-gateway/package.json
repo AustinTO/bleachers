@@ -1,13 +1,14 @@
 {
   "name": "media-gateway",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Simulcast MoQ Gateway",
+  "main": "index.ts",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "tsx index.ts"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "dependencies": {
+    "@moqt/transport": "^0.5.7",
+    "tsx": "^4.7.1"
+  },
   "type": "commonjs"
 }
