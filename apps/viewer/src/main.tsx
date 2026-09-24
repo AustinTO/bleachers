@@ -475,9 +475,7 @@ function ArchivedReplay({ gameId, game, event, onClose }: { gameId: string; game
           encoder.encode(newFrame, { keyFrame: decodedCount % 60 === 0 });
           newFrame.close();
           frame.close();
-          decodedCount++;
           pendingFrames--;
-          if (decodedCount === videoFrames.length) decodeResolve();
         },
         error: (e) => { encodeError = e; decodeResolve(); }
       });
@@ -489,7 +487,14 @@ function ArchivedReplay({ gameId, game, event, onClose }: { gameId: string; game
       }
       
       await decoder.flush();
+      
+      // Wait for all emitted frames to be processed and encoded
+      while (pendingFrames > 0 && !encodeError) {
+        await new Promise(r => setTimeout(r, 10));
+      }
+      decodeResolve();
       await decodePromise;
+      
       await encoder.flush();
       if (encodeError) throw encodeError;
       
@@ -536,6 +541,14 @@ function ArchivedReplay({ gameId, game, event, onClose }: { gameId: string; game
           return unpackArchiveSegment(new Uint8Array(await file.arrayBuffer()), segment.startMs);
         }))).flat();
         if (abort.signal.aborted) return;
+        
+        let lastUs = -1;
+        frames.sort((a, b) => a.receivedAtMs - b.receivedAtMs); // Ensure chronological order even if segments arrived out of order
+        for (const frame of frames) {
+          frame.timestampUs = Math.max(lastUs + 1, Math.round(frame.receivedAtMs * 1000));
+          lastUs = frame.timestampUs;
+        }
+        
         const eventFrame = frames.reduce<(typeof frames)[number] | undefined>((closest, frame) => !closest || Math.abs(frame.receivedAtMs - eventMs) < Math.abs(closest.receivedAtMs - eventMs) ? frame : closest, undefined);
         if (!eventFrame || Math.abs(eventFrame.receivedAtMs - eventMs) > 15_000) throw new Error('Archived video does not cover this moment (clock drift may be too high).');
         let firstKeyframe = -1;
