@@ -603,7 +603,7 @@ S1 + S2 + S3 + S4 + S5 + S6 ─────────────────�
 
 ## 16. Sprint backlog and acceptance criteria
 
-### Sprint 0 — Transport spike (2 weeks; go/no-go)
+### Sprint 0 — Transport spike (2 weeks; go/no-go) **(Completed)**
 
 1. Establish Game Timeline v1: DO epoch/clock anchor, monotonic game timestamp,
    media PTS correlation record, and timestamp→group/object Replay Index fixture.
@@ -623,7 +623,7 @@ a resolvable media location across the tested camera; reconnect jumps live; and
 replay first frame ≤2 s. Otherwise record cause and choose the fallback
 transport before S1.
 
-### Sprint 1 — Game foundation (2 weeks)
+### Sprint 1 — Game foundation (2 weeks) **(Completed)**
 
 Team/game CRUD, organizer auth, opaque expiring links, Game Core DO state
 socket, scorekeeper join, one-phone score/clock/goal/save/highlight commands,
@@ -635,7 +635,7 @@ cannot create divergent state; event p95 propagation <500 ms; revoked link and
 cross-game requests fail; Netlify production build reaches the Worker with the
 configured API origin while MoQ media remains a direct browser→relay path.
 
-### Sprint 2 — Real broadcast (3 weeks)
+### Sprint 2 — Real broadcast (3 weeks) **(Completed)**
 
 Native broadcaster flow, preflight, one-tap Start Live, adaptive encoder,
 viewer player, health UI, camera/encoder recovery, reconnection and
@@ -645,7 +645,7 @@ no-stale-edge rules. Ensure score/event controls remain usable over camera.
 path; quality ladder maintains state during imposed congestion; temporary outage
 automatically resumes current live edge.
 
-### Sprint 3 — Replay (3 weeks)
+### Sprint 3 — Replay (3 weeks) **(Completed)**
 
 Three-minute target ring buffer, timestamp correlation, event bookmark/replay
 navigation, concurrent live/replay player behavior, return-to-live, anonymous
@@ -657,7 +657,7 @@ subscription/state stays current during replay; LIVE never plays stale backlog;
 duplicate saves merge; Catch Me Up can chain existing event windows without a
 render job.
 
-### Sprint 4 — Persistence (2 weeks)
+### Sprint 4 — Persistence (2 weeks) **(Completed)**
 
 R2 immutable selected highlights/manifests, D1 index, postgame page, private
 sharing, retention configuration, archive-gap reconciliation, and admin
@@ -666,7 +666,7 @@ deletion.
 **Accept:** selected highlight remains playable after game; deletion revokes
 delivery and completes storage cleanup; no raw recording required by default.
 
-### Sprint 5 — Field hardening (3 weeks)
+### Sprint 5 — Field hardening (3 weeks) **(In Progress)**
 
 Carrier matrices, thermal/battery, 90-minute games, phone call/app interruption,
 Wi-Fi↔cell handoff, adverse loss/throughput, live-first encoder recovery,
@@ -676,7 +676,7 @@ archive-gap backfill isolation, operational playbook.
 documented supported device/network envelope; field targets are met in 80%+ of
 measured good-condition sessions before pilot.
 
-### Sprint 6 — Distribution (2–3 weeks)
+### Sprint 6 — Distribution (2–3 weeks) **(Completed)**
 
 Ship URL sharing first.  Separately spike and then build containerized
 MoQ/SFU-subscriber→RTMPS `BroadcastDestination`, secure destination credential
