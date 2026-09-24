@@ -71,6 +71,27 @@ export default function App() {
     setEvents(game.events.map((event) => ({ id: event.id, kind: event.kind, elapsedSeconds: event.gameTimeSeconds })));
   };
 
+  const reconnectingRef = useRef(false);
+  const reconnectMoq = async (activeGameId: string) => {
+    if (reconnectingRef.current || !liveRef.current) return;
+    reconnectingRef.current = true;
+    setIsConnecting(true);
+    try {
+      moqSession.current?.close();
+      moqSession.current = undefined;
+      const capability = await api.mediaCapability(activeGameId, 'publisher');
+      moqSession.current = await connectCloudflareMoq(capability.relayUrl, capability.broadcastName, capability.capabilityIdentity);
+      setIsConnecting(false);
+      reconnectingRef.current = false;
+    } catch (error) {
+      console.error('[bleachers:reconnect-error]', error);
+      setTimeout(() => {
+        reconnectingRef.current = false;
+        if (liveRef.current) reconnectMoq(activeGameId);
+      }, 2000);
+    }
+  };
+
   const startLive = async () => {
     if (!cameraReady) return Alert.alert('Camera is still starting', 'Wait for the preview, then try again.');
     if (Platform.OS === 'android') {
@@ -81,10 +102,10 @@ export default function App() {
     setIsConnecting(true);
     let started: RemoteGame;
     try {
-      if (setupMode === 'join' && existingCode) {
+      if (setupMode === 'join' && joinGameCode.trim()) {
         if (!joinOrganizerSecret.trim()) throw new Error('Enter the organizer PIN to broadcast to an existing game.');
         setOrganizerSecret(joinOrganizerSecret);
-        const existing = await api.getGame(existingCode);
+        const existing = await api.getGame(joinGameCode.trim());
         if (existing.status === 'ended') throw new Error('That game has already ended. Create a new game or use another code.');
         started = existing.status === 'live' ? existing : await api.startGame(existing.gameId);
       } else {
@@ -102,26 +123,19 @@ export default function App() {
     }
     try {
       const capability = await api.mediaCapability(started.gameId, 'publisher');
-      console.info('[bleachers:capability]', { gameId: started.gameId, role: 'publisher', relayOrigin: new URL(capability.relayUrl).origin, capabilityIdentity: capability.capabilityIdentity, broadcastName: capability.broadcastName, namespace: capability.broadcastName.split('/'), trackName: 'media/main/video' });
+      console.info('[bleachers:capability]', { gameId: started.gameId, role: 'publisher', relayOrigin: new URL(capability.relayUrl).origin, capabilityIdentity: capability.capabilityIdentity, broadcastName: capability.broadcastName });
       moqSession.current = await connectCloudflareMoq(capability.relayUrl, capability.broadcastName, capability.capabilityIdentity);
       setIsLive(true);
       liveRef.current = true;
       await new Promise<void>((resolve) => setTimeout(resolve, 250));
-      // Use the camera's widely supported hardware surface size. The preview
-      // and viewer presentation layers handle portrait display separately.
-      // Conservative 720p profile for sideline reliability on mobile H.264
-      // hardware; Camera2 can recover rather than wedging the encoder.
       await BleachersCamera.start(1280, 720, 24, 1_200_000);
       await BleachersCamera.startAudio();
       archiveRef.current = new MediaArchive(started.gameId, getOrganizerSecret());
-      void pumpH264(moqSession.current, () => liveRef.current, archiveRef.current).catch((cause) => {
-        console.error('[bleachers:h264-pump-error]', cause instanceof Error ? cause.message : String(cause));
-        liveRef.current = false;
-        moqSession.current = undefined;
-        setIsLive(false);
-        Alert.alert('Live stream stopped', cause instanceof Error ? cause.message : 'The MoQ relay connection closed.');
+      
+      void pumpH264(() => moqSession.current, () => reconnectMoq(started.gameId), () => liveRef.current, archiveRef.current).catch((cause) => {
+        console.error('[bleachers:h264-pump-fatal]', cause instanceof Error ? cause.message : String(cause));
       });
-      void pumpAac(moqSession.current, () => liveRef.current, archiveRef.current).catch((cause) => console.error('[bleachers:aac-pump-error]', cause instanceof Error ? cause.message : String(cause)));
+      void pumpAac(() => moqSession.current, () => liveRef.current, archiveRef.current).catch((cause) => console.error('[bleachers:aac-pump-fatal]', cause instanceof Error ? cause.message : String(cause)));
     } catch (cause) {
       liveRef.current = false;
       await archiveRef.current?.finish();
@@ -137,6 +151,7 @@ export default function App() {
   const endLive = async () => {
     await BleachersCamera.stop().catch(() => undefined);
     liveRef.current = false;
+    reconnectingRef.current = false;
     setIsLive(false);
     setIsSaving(true);
     await archiveRef.current?.finish();
@@ -219,35 +234,38 @@ export default function App() {
   );
 }
 
-async function pumpH264(session: CloudflareMoqSession, isStillLive: () => boolean, archive?: MediaArchive) {
-  try { while (isStillLive()) {
-    // Check relay health even when the camera queue is temporarily empty.
-    // Otherwise a dead native session leaves the UI claiming LIVE forever
-    // and viewers correctly receive Track not found.
-    await session.check();
-    const frame = await BleachersCamera.readFrame();
-    if (!frame) { await new Promise<void>((resolve) => setTimeout(resolve, 5)); continue; }
-    const payload = encodeH264Frame(frame.payload, frame.timestampUs, frame.keyframe, frame.width, frame.height);
-    archive?.add(payload, frame.timestampUs, frame.keyframe);
-    await session.sendObject({
-      payload,
-      timestampUs: frame.timestampUs,
-      keyframe: frame.keyframe,
-    });
-  } } finally { await archive?.finish(); }
+async function pumpH264(getSession: () => CloudflareMoqSession | undefined, onDisconnect: () => void, isStillLive: () => boolean, archive?: MediaArchive) {
+  try {
+    while (isStillLive()) {
+      const frame = await BleachersCamera.readFrame();
+      if (!frame) { await new Promise<void>((resolve) => setTimeout(resolve, 5)); continue; }
+      const payload = encodeH264Frame(frame.payload, frame.timestampUs, frame.keyframe, frame.width, frame.height);
+      archive?.add(payload, frame.timestampUs, frame.keyframe);
+      const session = getSession();
+      if (session) {
+        try {
+          await session.check();
+          await session.sendObject({ payload, timestampUs: frame.timestampUs, keyframe: frame.keyframe });
+        } catch (error) {
+          onDisconnect();
+        }
+      }
+    }
+  } finally { await archive?.finish(); }
 }
 
-async function pumpAac(session: CloudflareMoqSession, isStillLive: () => boolean, archive?: MediaArchive) {
+async function pumpAac(getSession: () => CloudflareMoqSession | undefined, isStillLive: () => boolean, archive?: MediaArchive) {
   while (isStillLive()) {
     const frame = await BleachersCamera.readAudioFrame();
     if (!frame) { await new Promise<void>((resolve) => setTimeout(resolve, 5)); continue; }
     const payload = encodeAacFrame(frame.payload, frame.timestampUs, frame.config, frame.sampleRate, frame.channels);
     archive?.add(payload, frame.timestampUs, false);
-    await session.sendAudioObject({
-      payload,
-      timestampUs: frame.timestampUs,
-      keyframe: false,
-    });
+    const session = getSession();
+    if (session) {
+      try {
+        await session.sendAudioObject({ payload, timestampUs: frame.timestampUs, keyframe: false });
+      } catch { /* let video pump handle disconnect */ }
+    }
   }
 }
 
