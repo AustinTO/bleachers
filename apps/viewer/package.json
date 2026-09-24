@@ -12,6 +12,7 @@
     "@moq/watch": "^0.5.4",
     "@moqt/transport": "^0.5.7",
     "@moqt/webtransport": "^0.5.7",
+    "mp4-muxer": "^5.2.2",
     "react": "19.3.0",
     "react-dom": "19.3.0"
   },

@@ -37,6 +37,7 @@ type GameSnapshot = {
   clockUpdatedAt?: number;
   sequence: number;
   events: GameEvent[];
+  latestTelemetry?: any;
 };
 
 const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8' };
@@ -151,6 +152,13 @@ export class GameState extends DurableObject<Env> {
     return snapshot;
   }
 
+  async applyTelemetry(data: any): Promise<void> {
+    const snapshot = this.requireSnapshot();
+    if (snapshot.status !== 'live') return;
+    snapshot.latestTelemetry = data;
+    await this.persist();
+  }
+
   private requireSnapshot() {
     if (!this.snapshot) throw new Error('game_not_found');
     return this.snapshot;
@@ -232,6 +240,14 @@ async function gameRoute(request: Request, env: Env, gameId: string, rest: strin
     try {
       return json({ game: await game.applyCommand({ kind: command.kind, team: command.team, running: command.running, clockSeconds: command.clockSeconds }) });
     } catch (cause) { return error(cause instanceof Error ? cause.message : 'command_failed', 409); }
+  }
+  if (request.method === 'POST' && rest[0] === 'telemetry') {
+    const telemetry = await body<any>(request);
+    if (!telemetry) return error('invalid_telemetry', 400);
+    try {
+      await game.applyTelemetry(telemetry);
+      return json({ success: true });
+    } catch (cause) { return error('telemetry_failed', 500); }
   }
   if (request.method === 'GET' && rest[0] === 'moments') {
     const viewerSessionId = new URL(request.url).searchParams.get('viewerSessionId')?.trim();

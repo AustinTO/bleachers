@@ -7,7 +7,7 @@ import { api, EventKind, RemoteGame, TeamSide, getOrganizerSecret, setOrganizerS
 import { connectCloudflareMoq, PROBE, type CloudflareMoqSession } from './src/cloudflareMoq';
 import BleachersCamera, { BleachersCameraPreview } from './modules/bleachers-camera';
 import { encodeAacFrame, encodeH264Frame } from './src/mediaEnvelope';
-import { VideoArchive } from './src/archive';
+import { MediaArchive } from './src/archive';
 
 type GameEventKind = EventKind;
 type GameEvent = { id: string; kind: GameEventKind; elapsedSeconds: number };
@@ -27,8 +27,8 @@ export default function App() {
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [homeScore, setHomeScore] = useState(0);
   const [awayScore, setAwayScore] = useState(0);
-  const [homeTeam, setHomeTeam] = useState('Tigers');
-  const [awayTeam, setAwayTeam] = useState('Eagles');
+  const [homeTeam, setHomeTeam] = useState('');
+  const [awayTeam, setAwayTeam] = useState('');
   const [events, setEvents] = useState<GameEvent[]>([]);
   const [cameraReady, setCameraReady] = useState(false);
   const [gameId, setGameId] = useState<string>();
@@ -51,7 +51,7 @@ export default function App() {
   };
   const moqSession = useRef<CloudflareMoqSession | undefined>(undefined);
   const liveRef = useRef(false);
-  const archiveRef = useRef<VideoArchive | undefined>(undefined);
+  const archiveRef = useRef<MediaArchive | undefined>(undefined);
 
   useEffect(() => {
     if (!isClockRunning) return;
@@ -87,7 +87,8 @@ export default function App() {
         if (existing.status === 'ended') throw new Error('That game has already ended. Create a new game or use another code.');
         started = existing.status === 'live' ? existing : await api.startGame(existing.gameId);
       } else {
-        const created = await api.createGame('Tigers', 'Eagles');
+        if (!homeTeam.trim() || !awayTeam.trim()) throw new Error('Enter names for both teams to start a new game.');
+        const created = await api.createGame(homeTeam.trim(), awayTeam.trim());
         started = await api.startGame(created.gameId);
       }
       setGameId(started.gameId);
@@ -111,7 +112,7 @@ export default function App() {
       // hardware; Camera2 can recover rather than wedging the encoder.
       await BleachersCamera.start(1280, 720, 24, 1_200_000);
       await BleachersCamera.startAudio();
-      archiveRef.current = new VideoArchive(started.gameId, getOrganizerSecret());
+      archiveRef.current = new MediaArchive(started.gameId, getOrganizerSecret());
       void pumpH264(moqSession.current, () => liveRef.current, archiveRef.current).catch((cause) => {
         console.error('[bleachers:h264-pump-error]', cause instanceof Error ? cause.message : String(cause));
         liveRef.current = false;
@@ -119,7 +120,7 @@ export default function App() {
         setIsLive(false);
         Alert.alert('Live stream stopped', cause instanceof Error ? cause.message : 'The MoQ relay connection closed.');
       });
-      void pumpAac(moqSession.current, () => liveRef.current).catch((cause) => console.error('[bleachers:aac-pump-error]', cause instanceof Error ? cause.message : String(cause)));
+      void pumpAac(moqSession.current, () => liveRef.current, archiveRef.current).catch((cause) => console.error('[bleachers:aac-pump-error]', cause instanceof Error ? cause.message : String(cause)));
     } catch (cause) {
       liveRef.current = false;
       await archiveRef.current?.finish();
@@ -184,6 +185,12 @@ export default function App() {
         {(!isLive || hudVisible) && <View style={[styles.controls, styles.liveControls]}>
           {!isLive && <TextInput accessibilityLabel="Game code or organizer link" autoCapitalize="none" autoCorrect={false} placeholder="Game code or organizer link" placeholderTextColor="#7EA28B" value={joinGameCode} onChangeText={updateJoinGame} style={styles.gameCodeInput} />}
           {!isLive && !!joinGameCode.trim() && <TextInput accessibilityLabel="Organizer PIN" autoCapitalize="characters" autoCorrect={false} placeholder="Organizer PIN" placeholderTextColor="#7EA28B" value={joinOrganizerSecret} onChangeText={setJoinOrganizerSecret} style={styles.gameCodeInput} />}
+          {!isLive && !joinGameCode.trim() && (
+            <View style={{ flexDirection: 'row', gap: 5 }}>
+              <TextInput accessibilityLabel="Home team" placeholder="Home team" placeholderTextColor="#7EA28B" value={homeTeam} onChangeText={setHomeTeam} style={[styles.gameCodeInput, { flex: 1 }]} />
+              <TextInput accessibilityLabel="Away team" placeholder="Away team" placeholderTextColor="#7EA28B" value={awayTeam} onChangeText={setAwayTeam} style={[styles.gameCodeInput, { flex: 1 }]} />
+            </View>
+          )}
           <View style={styles.goalRow}>
             <Pressable style={[styles.eventButton, styles.goalButton, isLive && styles.liveEventButton, { paddingVertical: 10, borderRadius: 10 }]} onPress={() => addGoal('home')}><Text style={[styles.eventButtonText, { fontSize: 17 }]}>GOAL</Text><Text style={styles.eventSubtext}>{homeTeam.toUpperCase()}</Text></Pressable>
             <Pressable style={[styles.eventButton, styles.goalButton, isLive && styles.liveEventButton, { paddingVertical: 10, borderRadius: 10 }]} onPress={() => addGoal('away')}><Text style={[styles.eventButtonText, { fontSize: 17 }]}>GOAL</Text><Text style={styles.eventSubtext}>{awayTeam.toUpperCase()}</Text></Pressable>
@@ -200,7 +207,7 @@ export default function App() {
   );
 }
 
-async function pumpH264(session: CloudflareMoqSession, isStillLive: () => boolean, archive?: VideoArchive) {
+async function pumpH264(session: CloudflareMoqSession, isStillLive: () => boolean, archive?: MediaArchive) {
   try { while (isStillLive()) {
     // Check relay health even when the camera queue is temporarily empty.
     // Otherwise a dead native session leaves the UI claiming LIVE forever
@@ -218,12 +225,14 @@ async function pumpH264(session: CloudflareMoqSession, isStillLive: () => boolea
   } } finally { await archive?.finish(); }
 }
 
-async function pumpAac(session: CloudflareMoqSession, isStillLive: () => boolean) {
+async function pumpAac(session: CloudflareMoqSession, isStillLive: () => boolean, archive?: MediaArchive) {
   while (isStillLive()) {
     const frame = await BleachersCamera.readAudioFrame();
     if (!frame) { await new Promise<void>((resolve) => setTimeout(resolve, 5)); continue; }
+    const payload = encodeAacFrame(frame.payload, frame.timestampUs, frame.config, frame.sampleRate, frame.channels);
+    archive?.add(payload, frame.timestampUs, false);
     await session.sendAudioObject({
-      payload: encodeAacFrame(frame.payload, frame.timestampUs, frame.config, frame.sampleRate, frame.channels),
+      payload,
       timestampUs: frame.timestampUs,
       keyframe: false,
     });

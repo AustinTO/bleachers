@@ -1,5 +1,5 @@
 /** Uploads bounded, independently decodable H.264 chunks without holding up the relay. */
-export class VideoArchive {
+export class MediaArchive {
   private frames: Uint8Array[] = [];
   private bytes = 0;
   private startUs = 0;

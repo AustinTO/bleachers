@@ -35,12 +35,12 @@ selected-highlight persistence, recovery, and health metrics. A second camera
 is contract-ready; contribute-an-angle approval, director mode, and viewer
 angle choice follow once the main-timeline path is proven.
 
-Excluded: public discovery, chat/comments, player identity/biometrics, AI
-tracking, advanced statistics, recruiting, tournaments, editing, and broad team
-management. Facebook URL sharing is MVP-adjacent; actual Facebook Live
-simulcast is Sprint 6 only. Automated Catch Me Up selection, multicamera
-director controls, and archive gap backfill are designed now but ship behind
-their dependencies rather than delaying reliable one-camera DVR.
+Excluded: recruiting, editing. Facebook URL sharing is MVP-adjacent; actual Facebook Live
+simulcast is Sprint 6 only.
+
+Included and Prioritized to beat Sideline HD: public discovery, chat/comments, player identity/biometrics, AI
+tracking, advanced statistics, tournaments, broad team management, Automated Catch Me Up selection, multicamera
+director controls, and archive gap backfill. These are critical for our competitive advantage.
 
 ## 3. Reference architecture
 
@@ -706,6 +706,38 @@ event replay across main plus one alternate camera.
 viewer selects the angle → it remains preview quality; selection promotes it
 without interrupting main; one event resolves aligned replay locations on both
 cameras. This sprint is not a dependency for the first pilot.
+
+### Sprint 9 — AI Tracking & Advanced Statistics
+
+Integrate player identity/biometrics, real-time AI ball and player tracking, and automated advanced statistics generation.
+
+**Accept:** AI models successfully track primary action and key players without manual input; statistics are surfaced in real-time to the timeline and viewer UI.
+
+### Sprint 10 — Advanced Highlights & Automated Catch Me Up
+
+Implement automated Catch Me Up selection driven by AI and viewer saves. Build out chat/comments, public game discovery, and advanced team management features.
+
+**Accept:** Late viewers automatically receive an intelligent Catch Me Up reel. Public games are searchable, and viewers can interact via real-time chat/comments.
+
+### Sprint 11 — Tournaments & Broad Team Management
+
+Support multi-game tournament brackets, broad team management across seasons, and complex event structures.
+
+**Accept:** Organizers can create tournaments, link multiple games, and users can track progression across brackets seamlessly.
+
+### Sprint 12 — Cloudflare Jev-Powered Decision Layer
+
+Incorporate Jev as a real-time AI decision fabric for multi-camera broadcasting and game intelligence. Jev acts as an AI Assistant Director (recommendation-only initially) and does NOT process raw video directly. It consumes compact structured metadata from separate vision, audio, and game-state systems.
+
+Target architecture:
+Camera/video/audio/game state
+→ lightweight CV / vision / OCR / audio analysis
+→ normalized per-camera metadata
+→ Cloudflare Worker
+→ Jev decisions
+→ broadcaster UI, automation, clips, notifications, or escalation
+
+**Accept:** Telemetry schema is implemented, Worker endpoints consume metadata, Jev models ingest telemetry to produce reliable switching, highlighting, and operational recommendations without processing raw media.
 
 ### Website follow-on backlog (after current MVP path)
 

@@ -3,6 +3,7 @@ import '@moq/publish/ui';
 import { MoqtConnection } from '@moqt/webtransport';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import { Muxer, ArrayBufferTarget } from 'mp4-muxer';
 import './styles.css';
 
 type EventKind = 'GOAL' | 'SAVE' | 'FOUL' | 'HIGHLIGHT' | 'GOAL_CORRECTION';
@@ -376,7 +377,7 @@ function drainReplayQueue(
 type ArchiveSegment = { id: string; startMs: number; endMs: number; url: string };
 
 function unpackArchiveSegment(bytes: Uint8Array, startMs: number) {
-  const frames: { keyframe: boolean; timestampUs: number; receivedAtMs: number; payload: Uint8Array }[] = [];
+  const frames: { type: 'video' | 'audio'; keyframe: boolean; timestampUs: number; receivedAtMs: number; payload: Uint8Array; sampleRate?: number; channels?: number; config?: Uint8Array }[] = [];
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   let offset = 0;
   let firstTimestampUs: number | undefined;
@@ -384,10 +385,22 @@ function unpackArchiveSegment(bytes: Uint8Array, startMs: number) {
     const length = view.getUint32(offset);
     offset += 4;
     if (length < 17 || offset + length > bytes.length) throw new Error('Archived video is incomplete');
-    const frame = decodeH264Envelope(bytes.subarray(offset, offset + length));
-    if (!frame) throw new Error('Archived video is invalid');
-    firstTimestampUs ??= frame.timestampUs;
-    frames.push({ ...frame, receivedAtMs: startMs + (frame.timestampUs - firstTimestampUs) / 1000 });
+    const envelope = bytes.subarray(offset, offset + length);
+    const isVideo = hasH264Envelope(envelope);
+    const isAudio = !isVideo && envelope[0] === 0x42 && envelope[1] === 0x4c && envelope[2] === 0x41 && envelope[3] === 0x31;
+    
+    if (isVideo) {
+      const frame = decodeH264Envelope(envelope);
+      if (!frame) throw new Error('Archived video is invalid');
+      firstTimestampUs ??= frame.timestampUs;
+      frames.push({ type: 'video', ...frame, receivedAtMs: startMs + (frame.timestampUs - firstTimestampUs) / 1000 });
+    } else if (isAudio) {
+      const frame = decodeAacEnvelope(envelope);
+      if (!frame) throw new Error('Archived audio is invalid');
+      firstTimestampUs ??= frame.timestampUs;
+      frames.push({ type: 'audio', keyframe: false, ...frame, receivedAtMs: startMs + (frame.timestampUs - firstTimestampUs) / 1000 });
+    }
+    
     offset += length;
   }
   if (offset !== bytes.length) throw new Error('Archived video is incomplete');
@@ -397,6 +410,10 @@ function unpackArchiveSegment(bytes: Uint8Array, startMs: number) {
 function ArchivedReplay({ gameId, event, onClose }: { gameId: string; event: EventItem; onClose: () => void }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const decoderRef = useRef<VideoDecoder | undefined>(undefined);
+  const audioContextRef = useRef<AudioContext | undefined>(undefined);
+  const audioDecoderRef = useRef<AudioDecoder | undefined>(undefined);
+  const audioNextTimeRef = useRef(0);
+  const audioMutedRef = useRef(false);
   const queueRef = useRef<{ keyframe: boolean; timestampUs: number; payload: Uint8Array }[]>([]);
   const baseRef = useRef<{ timestampUs: number; wallMs: number } | undefined>(undefined);
   const timerRef = useRef<number | undefined>(undefined);
@@ -405,11 +422,43 @@ function ArchivedReplay({ gameId, event, onClose }: { gameId: string; event: Eve
   const [loading, setLoading] = useState(true);
   const [finished, setFinished] = useState(false);
   const [retry, setRetry] = useState(0);
+  const [playableFrames, setPlayableFrames] = useState<any[]>([]);
+
+  const downloadClip = () => {
+    if (!playableFrames.length) return;
+    const firstAudio = playableFrames.find(f => f.type === 'audio');
+    const muxer = new Muxer({
+      target: new ArrayBufferTarget(),
+      video: { codec: 'avc', width: 1280, height: 720 },
+      audio: firstAudio && firstAudio.sampleRate && firstAudio.channels ? {
+        codec: 'aac',
+        sampleRate: firstAudio.sampleRate,
+        numberOfChannels: firstAudio.channels,
+      } : undefined,
+      firstTimestampBehavior: 'offset',
+      fastStart: 'in-memory',
+    });
+    for (const frame of playableFrames) {
+      if (frame.type === 'video') muxer.addVideoChunk(new EncodedVideoChunk({ type: frame.keyframe ? 'key' : 'delta', timestamp: frame.timestampUs, data: frame.payload }));
+      else if (frame.type === 'audio') muxer.addAudioChunk(new EncodedAudioChunk({ type: 'key', timestamp: frame.timestampUs, data: frame.payload }));
+    }
+    muxer.finalize();
+    const blob = new Blob([muxer.target.buffer], { type: 'video/mp4' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `clip-${event.id}.mp4`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+  };
+
   useEffect(() => {
     const abort = new AbortController();
     const run = async () => {
       setLoading(true); setError(''); setFinished(false);
       closeDecoder(decoderRef);
+      closeAudioDecoder(audioDecoderRef);
+      audioContextRef.current?.close().catch(() => undefined);
+      audioContextRef.current = undefined;
+      audioNextTimeRef.current = 0;
       queueRef.current = [];
       baseRef.current = undefined;
       timerRef.current = undefined;
@@ -440,16 +489,39 @@ function ArchivedReplay({ gameId, event, onClose }: { gameId: string; event: Eve
         if (firstKeyframe < 0) throw new Error('Archived video has no keyframe before this moment.');
         const playable = frames.slice(firstKeyframe).filter((frame) => frame.receivedAtMs <= endMs);
         if (!playable.length) throw new Error('Archived video is not ready yet.');
+        setPlayableFrames(playable);
         setLoading(false);
-        for (const frame of playable) enqueueReplayFrame(frame, decoderRef, queueRef, baseRef, timerRef, canvasRef, telemetryRef, (active) => { if (!active) setFinished(true); });
+        for (const frame of playable) {
+          if (frame.type === 'video') {
+            enqueueReplayFrame(frame, decoderRef, queueRef, baseRef, timerRef, canvasRef, telemetryRef, (active) => { if (!active) setFinished(true); });
+          } else if (frame.type === 'audio' && frame.sampleRate && frame.channels && frame.config) {
+            if (!audioContextRef.current) {
+               audioContextRef.current = new AudioContext();
+               audioDecoderRef.current = new AudioDecoder({
+                 output: (audio) => playAudioData(audioContextRef.current!, audio, audioNextTimeRef, audioMutedRef),
+                 error: (e) => console.info('[bleachers:archived-aac-error]', { error: e.message })
+               });
+               audioDecoderRef.current.configure({ codec: 'mp4a.40.2', sampleRate: frame.sampleRate, numberOfChannels: frame.channels, description: frame.config });
+            }
+            if (audioDecoderRef.current?.state === 'configured') {
+              try { audioDecoderRef.current.decode(new EncodedAudioChunk({ type: 'key', timestamp: frame.timestampUs, data: frame.payload })); }
+              catch (e) { console.info('[bleachers:archived-aac-drop]', { error: String(e) }); }
+            }
+          }
+        }
       } catch (cause) {
         if (!abort.signal.aborted) { setLoading(false); setError(cause instanceof Error ? cause.message : 'Archived video could not be played.'); }
       }
     };
     void run();
-    return () => { abort.abort(); if (timerRef.current !== undefined) window.clearTimeout(timerRef.current); timerRef.current = undefined; closeDecoder(decoderRef); queueRef.current = []; baseRef.current = undefined; };
+    return () => { abort.abort(); if (timerRef.current !== undefined) window.clearTimeout(timerRef.current); timerRef.current = undefined; closeDecoder(decoderRef); closeAudioDecoder(audioDecoderRef); audioContextRef.current?.close().catch(()=>undefined); queueRef.current = []; baseRef.current = undefined; };
   }, [gameId, event, retry]);
-  return <div className="archived-replay"><canvas ref={canvasRef} />{loading ? <p role="status">Loading saved video…</p> : null}{error ? <div className="archive-error" role="status"><p>{error}</p><button onClick={() => setRetry((value) => value + 1)}>TRY AGAIN</button></div> : null}{finished ? <div className="archive-finished" role="status">Replay finished <button onClick={() => setRetry((value) => value + 1)}>PLAY AGAIN</button></div> : null}<button className="archive-close" onClick={onClose}>✕ CLOSE REPLAY</button></div>;
+  return <div className="archived-replay"><canvas ref={canvasRef} />{loading ? <p role="status">Loading saved video…</p> : null}{error ? <div className="archive-error" role="status"><p>{error}</p><button onClick={() => setRetry((value) => value + 1)}>TRY AGAIN</button></div> : null}{finished ? <div className="archive-finished" role="status">Replay finished <button onClick={() => setRetry((value) => value + 1)}>PLAY AGAIN</button></div> : null}
+    <div className="archive-controls">
+      {playableFrames.length > 0 && <button className="archive-download" onClick={downloadClip}>↓ DOWNLOAD MP4</button>}
+      <button className="archive-close" onClick={onClose}>✕ CLOSE REPLAY</button>
+    </div>
+  </div>;
 }
 
 function decodeH264Envelope(bytes: Uint8Array) {
@@ -520,8 +592,8 @@ function formatOrganizerPin(secret: string) {
 }
 
 function OrganizerSetup() {
-  const [homeTeam, setHomeTeam] = useState('Tigers');
-  const [awayTeam, setAwayTeam] = useState('Eagles');
+  const [homeTeam, setHomeTeam] = useState('');
+  const [awayTeam, setAwayTeam] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [createdGame, setCreatedGame] = useState<string>();
