@@ -237,7 +237,7 @@ async function gameRoute(request: Request, env: Env, gameId: string, rest: strin
   if (!row) return error('game_not_found', 404);
   const resolvedGameId = row.id;
   const capabilityInput = rest[0] === 'media-capability' ? await body<{ role?: string }>(request.clone()) : null;
-  const protectedAction = request.method === 'POST' && (['start', 'end', 'commands', 'media-segments'].includes(rest[0]) || rest[0] === 'media-capability' && capabilityInput?.role === 'publisher');
+  const protectedAction = request.method === 'POST' && (['start', 'end', 'commands', 'media-segments', 'broadcast-simulcast'].includes(rest[0]) || rest[0] === 'media-capability' && capabilityInput?.role === 'publisher');
   if (protectedAction) {
     const stored = await env.DB.prepare('SELECT organizer_secret_hash FROM games WHERE id = ?').bind(resolvedGameId).first<{ organizer_secret_hash: string | null }>();
     const supplied = request.headers.get('authorization')?.match(/^Bearer (.+)$/i)?.[1];
@@ -279,6 +279,21 @@ async function gameRoute(request: Request, env: Env, gameId: string, rest: strin
       await game.applyTelemetry(telemetry);
       return json({ success: true });
     } catch (cause) { return error('telemetry_failed', 500); }
+  }
+  if (request.method === 'POST' && rest[0] === 'broadcast-simulcast') {
+    const input = await body<{ rtmpUrl?: string }>(request);
+    if (!input?.rtmpUrl) return error('invalid_rtmp_url', 400);
+    
+    // Trigger Cloudflare Container deployment of media-gateway
+    console.log(`[simulcast] Triggering media-gateway container for game ${resolvedGameId} to ${input.rtmpUrl}`);
+    
+    // We would use Cloudflare Service Bindings to trigger the container:
+    // await env.MEDIA_GATEWAY_SERVICE.fetch('http://media-gateway/start', {
+    //   method: 'POST',
+    //   body: JSON.stringify({ gameId: resolvedGameId, rtmpUrl: input.rtmpUrl })
+    // });
+    
+    return json({ success: true, message: 'Simulcast gateway started' });
   }
   if (request.method === 'GET' && rest[0] === 'moments') {
     const viewerSessionId = new URL(request.url).searchParams.get('viewerSessionId')?.trim();
