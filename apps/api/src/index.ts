@@ -294,7 +294,8 @@ function validSegmentPayload(bytes: Uint8Array): boolean {
     const length = view.getUint32(offset, false);
     offset += 4;
     if (length < 18 || length > bytes.length - offset) return false;
-    if (String.fromCharCode(...bytes.subarray(offset, offset + 4)) !== 'BLC1') return false;
+    const magic = String.fromCharCode(...bytes.subarray(offset, offset + 4));
+    if (magic !== 'BLC1' && magic !== 'BLA1') return false;
     if (frames === 0 && bytes[offset + 4] !== 1) return false;
     offset += length;
     frames++;
