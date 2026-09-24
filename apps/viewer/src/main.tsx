@@ -524,8 +524,8 @@ function ArchivedReplay({ gameId, game, event, onClose }: { gameId: string; game
         if (!('VideoDecoder' in window)) throw new Error('This browser cannot play archived H.264 video.');
         const eventMs = event.createdAt ? Date.parse(event.createdAt) : Number.NaN;
         if (!Number.isFinite(eventMs)) throw new Error('This moment has no media timestamp.');
-        const startMs = eventMs - 12_000;
-        const endMs = eventMs + 8_000;
+        const startMs = eventMs - 30_000;
+        const endMs = eventMs + 30_000;
         const response = await fetch(`${API}/v1/games/${gameId}/media-segments?from=${startMs}&to=${endMs}`, { signal: abort.signal });
         if (!response.ok) throw new Error('Archived video could not be loaded.');
         const { segments } = await response.json() as { segments: ArchiveSegment[] };
@@ -537,14 +537,22 @@ function ArchivedReplay({ gameId, game, event, onClose }: { gameId: string; game
         }))).flat();
         if (abort.signal.aborted) return;
         const eventFrame = frames.reduce<(typeof frames)[number] | undefined>((closest, frame) => !closest || Math.abs(frame.receivedAtMs - eventMs) < Math.abs(closest.receivedAtMs - eventMs) ? frame : closest, undefined);
-        if (!eventFrame || Math.abs(eventFrame.receivedAtMs - eventMs) > 1_000) throw new Error('Archived video does not cover this moment.');
+        if (!eventFrame || Math.abs(eventFrame.receivedAtMs - eventMs) > 15_000) throw new Error('Archived video does not cover this moment (clock drift may be too high).');
         let firstKeyframe = -1;
         for (let index = 0; index < frames.length; index += 1) {
           if (frames[index].keyframe && frames[index].receivedAtMs <= startMs) firstKeyframe = index;
         }
-        if (firstKeyframe < 0) firstKeyframe = frames.findIndex((frame) => frame.keyframe && frame.receivedAtMs <= eventMs);
+        if (firstKeyframe < 0) firstKeyframe = frames.findIndex((frame) => frame.keyframe && frame.receivedAtMs <= eventMs + 5_000);
         if (firstKeyframe < 0) throw new Error('Archived video has no keyframe before this moment.');
-        const playable = frames.slice(firstKeyframe).filter((frame) => frame.receivedAtMs <= endMs);
+        // Playable frames are clamped to a 20-second window centered around the event
+        const playbackStart = eventFrame.receivedAtMs - 12_000;
+        const playbackEnd = eventFrame.receivedAtMs + 8_000;
+        
+        let bestKeyframe = firstKeyframe;
+        for (let index = firstKeyframe; index < frames.length; index++) {
+          if (frames[index].keyframe && frames[index].receivedAtMs <= playbackStart) bestKeyframe = index;
+        }
+        const playable = frames.slice(bestKeyframe).filter((frame) => frame.receivedAtMs <= playbackEnd);
         if (!playable.length) throw new Error('Archived video is not ready yet.');
         setPlayableFrames(playable);
         setLoading(false);
@@ -678,6 +686,9 @@ function OrganizerControls({ game, gameId, secret, onChange }: { game: Game; gam
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [copied, setCopied] = useState('');
+  const [rtmpUrl, setRtmpUrl] = useState('');
+  const [simulcastBusy, setSimulcastBusy] = useState(false);
+
   const copy = async (label: string, url: string) => {
     try { await navigator.clipboard.writeText(url); setCopied(label); }
     catch { setError('Could not copy the link. Select the URL shown below instead.'); }
@@ -692,10 +703,32 @@ function OrganizerControls({ game, gameId, secret, onChange }: { game: Game; gam
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Game update failed'); }
     finally { setBusy(false); }
   };
+  const startSimulcast = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!rtmpUrl) return;
+    setSimulcastBusy(true); setError('');
+    try {
+      const response = await fetch(`${API}/v1/games/${gameId}/broadcast-simulcast`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${secret}` }, body: JSON.stringify({ rtmpUrl }) });
+      if (!response.ok) throw new Error('Simulcast trigger failed');
+      alert('Simulcast gateway started successfully! (Check your destination in ~30s)');
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'Simulcast trigger failed'); }
+    finally { setSimulcastBusy(false); setRtmpUrl(''); }
+  };
+
   return <section className="organizer-controls"><div className="timeline-head"><h2>Organizer controls</h2><span>{game.status.toUpperCase()}</span></div>
     {error ? <p className="error">{error}</p> : null}
     {game.status === 'scheduled' ? <button disabled={busy} onClick={() => void send('start')}>START GAME</button> : null}
-    {game.status === 'live' ? <><div className="control-grid"><button disabled={busy} onClick={() => void send('commands', { kind: 'GOAL', team: 'home' })}>+ {game.homeTeam} goal</button><button disabled={busy} onClick={() => void send('commands', { kind: 'GOAL', team: 'away' })}>+ {game.awayTeam} goal</button><button disabled={busy} onClick={() => void send('commands', { kind: 'SAVE' })}>SAVE</button><button disabled={busy} onClick={() => void send('commands', { kind: 'HIGHLIGHT' })}>HIGHLIGHT</button><button disabled={busy} onClick={() => void send('commands', { kind: 'FOUL' })}>FOUL</button><button disabled={busy} onClick={() => void send('commands', { kind: 'CLOCK', running: !game.clockRunning })}>{game.clockRunning ? 'PAUSE CLOCK' : 'RESUME CLOCK'}</button></div><div className="correction-controls"><button disabled={busy || game.homeScore === 0} onClick={() => { if (window.confirm(`Remove one ${game.homeTeam} goal?`)) void send('commands', { kind: 'GOAL_CORRECTION', team: 'home' }); }}>− {game.homeTeam} goal</button><button disabled={busy || game.awayScore === 0} onClick={() => { if (window.confirm(`Remove one ${game.awayTeam} goal?`)) void send('commands', { kind: 'GOAL_CORRECTION', team: 'away' }); }}>− {game.awayTeam} goal</button></div><button className="end-game" disabled={busy} onClick={() => { if (window.confirm('End this game?')) void send('end'); }}>END GAME</button></> : null}
+    {game.status === 'live' ? <><div className="control-grid"><button disabled={busy} onClick={() => void send('commands', { kind: 'GOAL', team: 'home' })}>+ {game.homeTeam} goal</button><button disabled={busy} onClick={() => void send('commands', { kind: 'GOAL', team: 'away' })}>+ {game.awayTeam} goal</button><button disabled={busy} onClick={() => void send('commands', { kind: 'SAVE' })}>SAVE</button><button disabled={busy} onClick={() => void send('commands', { kind: 'HIGHLIGHT' })}>HIGHLIGHT</button><button disabled={busy} onClick={() => void send('commands', { kind: 'FOUL' })}>FOUL</button><button disabled={busy} onClick={() => void send('commands', { kind: 'CLOCK', running: !game.clockRunning })}>{game.clockRunning ? 'PAUSE CLOCK' : 'RESUME CLOCK'}</button></div><div className="correction-controls"><button disabled={busy || game.homeScore === 0} onClick={() => { if (window.confirm(`Remove one ${game.homeTeam} goal?`)) void send('commands', { kind: 'GOAL_CORRECTION', team: 'home' }); }}>− {game.homeTeam} goal</button><button disabled={busy || game.awayScore === 0} onClick={() => { if (window.confirm(`Remove one ${game.awayTeam} goal?`)) void send('commands', { kind: 'GOAL_CORRECTION', team: 'away' }); }}>− {game.awayTeam} goal</button></div>
+    
+    <div className="simulcast-section" style={{ background: 'rgba(255,255,255,0.05)', padding: '15px', borderRadius: '8px', marginTop: '1rem', border: '1px solid rgba(255,255,255,0.1)' }}>
+      <h3 style={{ margin: '0 0 10px 0', fontSize: '14px', textTransform: 'uppercase', letterSpacing: '1px' }}>Simulcast to Facebook/YouTube</h3>
+      <form onSubmit={startSimulcast} style={{ display: 'flex', gap: '10px' }}>
+        <input style={{ flex: 1, padding: '8px', borderRadius: '4px', border: 'none', background: 'rgba(0,0,0,0.5)', color: 'white' }} placeholder="rtmps://..." value={rtmpUrl} onChange={e => setRtmpUrl(e.target.value)} required />
+        <button style={{ padding: '8px 16px', background: '#3b82f6', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }} type="submit" disabled={simulcastBusy}>{simulcastBusy ? 'STARTING...' : 'START'}</button>
+      </form>
+    </div>
+    
+    <button className="end-game" disabled={busy} onClick={() => { if (window.confirm('End this game?')) void send('end'); }}>END GAME</button></> : null}
     <div className="share-actions"><button onClick={() => void copy('viewer', `${location.origin}/?game=${game.gameId}`)}>{copied === 'viewer' ? 'VIEWER LINK COPIED' : 'COPY VIEWER LINK'}</button><button onClick={() => void copy('organizer', `${location.origin}/?game=${game.gameId}&mode=organize#secret=${secret}`)}>{copied === 'organizer' ? 'ORGANIZER LINK COPIED' : 'COPY ORGANIZER LINK'}</button></div>
     <p className="muted">Viewer link: <code>{location.origin}/?game={game.gameId}</code></p>
     <p className="join-codes"><span>Game code <b>{game.gameId.slice(0, 6)}</b></span><span>Organizer PIN <code className="secret-code">{formatOrganizerPin(secret)}</code></span></p>
@@ -887,7 +920,7 @@ function App() {
 
   if (teamNameParam) return <TeamProfile teamName={teamNameParam} />;
   if (!gameId && params.get('mode') === 'setup') return <OrganizerSetup />;
-  if (!gameId) return <main className="shell empty"><span className="mark">BLEACHERS</span><h1>Private game link required.</h1><p>Open a link containing <code>?game=&lt;gameId&gt;</code>, <code>?team=&lt;teamName&gt;</code>, or use <code>?mode=setup</code>.</p></main>;
+  if (!gameId) return <LandingPage />;
 
   return <main className="shell">
     <header className="topbar"><div><span className="mark">BLEACHERS</span><span className="live-label">{isPublisher ? 'PUBLISHER' : game?.status === 'live' ? 'LIVE' : game?.status === 'ended' ? 'POSTGAME' : 'WAITING FOR GAME'}</span></div><div className="topbar-actions"><button className="share-link" onClick={() => void shareGame()}>SHARE</button><span className="privacy">PRIVATE GAME</span></div></header>
@@ -940,6 +973,37 @@ function TeamProfile({ teamName }: { teamName: string }) {
           <span>›</span>
         </button>
       )) : <p className="muted">No games found for this team.</p>}
+    </section>
+  </main>;
+}
+
+function LandingPage() {
+  const [code, setCode] = useState('');
+  return <main className="shell setup-shell">
+    <header className="topbar"><div><span className="mark">BLEACHERS</span><span className="live-label">LIVE SPORTS</span></div></header>
+    <section className="setup-card" style={{ marginTop: '2rem' }}>
+      <h1>Join a Game</h1>
+      <p className="muted">Enter a game code, UUID, or team name to connect directly.</p>
+      <form onSubmit={(e) => { 
+        e.preventDefault(); 
+        const cleaned = code.trim();
+        if (cleaned.length > 0) {
+          if (cleaned.includes(' ')) {
+            window.location.href = `/?team=${encodeURIComponent(cleaned)}`;
+          } else {
+            window.location.href = `/?game=${encodeURIComponent(cleaned)}`;
+          }
+        }
+      }}>
+        <label>Game Code or Team Name
+          <input value={code} onChange={(e) => setCode(e.target.value)} placeholder="e.g. ABCDEF or 'Tigers'" required />
+        </label>
+        <button className="live-button" type="submit">WATCH LIVE</button>
+      </form>
+      <div style={{ marginTop: '3rem', paddingTop: '2rem', borderTop: '1px solid rgba(255,255,255,0.1)' }}>
+        <p className="muted">Are you a team organizer?</p>
+        <button className="share-link" onClick={() => window.location.href = '/?mode=setup'} style={{ marginTop: '10px' }}>CREATE A NEW GAME</button>
+      </div>
     </section>
   </main>;
 }
