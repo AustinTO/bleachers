@@ -176,6 +176,7 @@ export default {
     if (request.method === 'GET' && url.pathname === '/health') response = json({ ok: true, service: 'bleachers-api' });
     else if (request.method === 'POST' && url.pathname === '/v1/games') response = await createGame(request, env);
     else if (parts[0] === 'v1' && parts[1] === 'games' && parts[2]) response = await gameRoute(request, env, parts[2], parts.slice(3));
+    else if (request.method === 'GET' && parts[0] === 'v1' && parts[1] === 'teams' && parts[2] && parts[3] === 'games') response = await teamGamesRoute(request, env, parts[2]);
     else response = error('not_found', 404);
     return cors(response);
   },
@@ -205,6 +206,23 @@ async function createGame(request: Request, env: Env) {
   await env.DB.prepare('INSERT INTO games (id, home_team, away_team, created_at, organizer_secret_hash) VALUES (?, ?, ?, ?, ?)').bind(gameId, homeTeam, awayTeam, createdAt, await hashSecret(organizerSecret)).run();
   const game = await env.GAME_STATE.getByName(gameId).create(gameId);
   return json({ game: { ...game, homeTeam, awayTeam, createdAt }, organizerSecret }, 201);
+}
+
+async function teamGamesRoute(request: Request, env: Env, teamName: string) {
+  const decodedTeam = decodeURIComponent(teamName);
+  const records = await env.DB.prepare('SELECT id, home_team, away_team, status, created_at, started_at, ended_at FROM games WHERE home_team = ? OR away_team = ? ORDER BY created_at DESC LIMIT 50').bind(decodedTeam, decodedTeam).all<{ id: string; home_team: string; away_team: string; status: string; created_at: string; started_at: string | null; ended_at: string | null }>();
+  return json({
+    team: decodedTeam,
+    games: records.results.map(r => ({
+      gameId: r.id,
+      homeTeam: r.home_team,
+      awayTeam: r.away_team,
+      status: r.status,
+      createdAt: r.created_at,
+      startedAt: r.started_at,
+      endedAt: r.ended_at
+    }))
+  });
 }
 
 async function gameRoute(request: Request, env: Env, gameId: string, rest: string[]) {

@@ -705,6 +705,7 @@ function OrganizerControls({ game, gameId, secret, onChange }: { game: Game; gam
 
 function App() {
   const gameId = params.get('game') ?? '';
+  const teamNameParam = params.get('team');
   const isPublisher = location.pathname === '/publish' || params.get('mode') === 'publish';
   const isOrganizer = params.get('mode') === 'organize';
   const organizerSecret = new URLSearchParams(location.hash.slice(1)).get('secret') ?? '';
@@ -884,8 +885,9 @@ function App() {
     } finally { setSaving(false); }
   }, [game, gameId, canonicalGameId, viewerSessionId, saveDisabled, selectedEvent]);
 
+  if (teamNameParam) return <TeamProfile teamName={teamNameParam} />;
   if (!gameId && params.get('mode') === 'setup') return <OrganizerSetup />;
-  if (!gameId) return <main className="shell empty"><span className="mark">BLEACHERS</span><h1>Private game link required.</h1><p>Open a link containing <code>?game=&lt;gameId&gt;</code> or use <code>?mode=setup</code>.</p></main>;
+  if (!gameId) return <main className="shell empty"><span className="mark">BLEACHERS</span><h1>Private game link required.</h1><p>Open a link containing <code>?game=&lt;gameId&gt;</code>, <code>?team=&lt;teamName&gt;</code>, or use <code>?mode=setup</code>.</p></main>;
 
   return <main className="shell">
     <header className="topbar"><div><span className="mark">BLEACHERS</span><span className="live-label">{isPublisher ? 'PUBLISHER' : game?.status === 'live' ? 'LIVE' : game?.status === 'ended' ? 'POSTGAME' : 'WAITING FOR GAME'}</span></div><div className="topbar-actions"><button className="share-link" onClick={() => void shareGame()}>SHARE</button><span className="privacy">PRIVATE GAME</span></div></header>
@@ -908,6 +910,39 @@ function App() {
 }
 
 function formatClock(seconds: number) { return `${Math.floor(seconds / 60).toString().padStart(2, '0')}:${(seconds % 60).toString().padStart(2, '0')}`; }
+
+function TeamProfile({ teamName }: { teamName: string }) {
+  const [games, setGames] = useState<{ gameId: string; homeTeam: string; awayTeam: string; status: string; createdAt: string; startedAt: string | null; endedAt: string | null }[]>([]);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    fetch(`${API}/v1/teams/${encodeURIComponent(teamName)}/games`)
+      .then(async res => { if (!res.ok) throw new Error(); return res.json(); })
+      .then((data: any) => setGames(data.games || []))
+      .catch(() => setError('Could not load team profile'));
+  }, [teamName]);
+  
+  return <main className="shell">
+    <header className="topbar"><div><span className="mark">BLEACHERS</span><span className="live-label">TEAM PROFILE</span></div><div className="topbar-actions"><button className="share-link" onClick={() => { navigator.clipboard.writeText(location.href); alert('Team link copied'); }}>SHARE</button></div></header>
+    <div className="empty" style={{ minHeight: 'auto', padding: '40px 0' }}>
+      <h1>{teamName}</h1>
+      <p className="muted">Game History & Upcoming Matchups</p>
+    </div>
+    {error ? <section className="error">{error}</section> : null}
+    <section className="timeline">
+      <div className="timeline-head"><h2>All Games</h2><span>{games.length} total</span></div>
+      {games.length ? games.map((g) => (
+        <button className="event" onClick={() => window.location.href = `/?game=${g.gameId}`} key={g.gameId}>
+          <span className="event-icon">{g.status === 'live' ? '🔴' : '🏟️'}</span>
+          <span>
+            <b>{g.homeTeam} vs {g.awayTeam}</b>
+            <small>{new Date(g.startedAt || g.createdAt).toLocaleDateString()} · {g.status.toUpperCase()}</small>
+          </span>
+          <span>›</span>
+        </button>
+      )) : <p className="muted">No games found for this team.</p>}
+    </section>
+  </main>;
+}
 
 // MoQ owns long-lived WebTransport state.  React StrictMode's development
 // double-mount leaves an in-flight SUBSCRIBE behind on some browser builds,
