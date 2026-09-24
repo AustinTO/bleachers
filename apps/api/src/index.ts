@@ -179,6 +179,19 @@ export default {
     else response = error('not_found', 404);
     return cors(response);
   },
+  async scheduled(event, env, ctx) {
+    const cutoffMs = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    const old = await env.DB.prepare('SELECT id, r2_key FROM media_segments WHERE end_ms < ? LIMIT 500').bind(cutoffMs).all<{ id: string; r2_key: string }>();
+    if (!old.results || old.results.length === 0) return;
+    const keys = old.results.map((r) => r.r2_key);
+    // Delete from R2 (could use delete array if supported, but loop is fine for now, or Promise.all)
+    await Promise.all(keys.map(k => env.MEDIA.delete(k)));
+    
+    // Delete from D1
+    const ids = old.results.map(r => r.id);
+    const placeholders = ids.map(() => '?').join(',');
+    await env.DB.prepare(`DELETE FROM media_segments WHERE id IN (${placeholders})`).bind(...ids).run();
+  },
 } satisfies ExportedHandler<Env>;
 
 async function createGame(request: Request, env: Env) {

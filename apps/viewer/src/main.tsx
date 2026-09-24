@@ -407,7 +407,7 @@ function unpackArchiveSegment(bytes: Uint8Array, startMs: number) {
   return frames;
 }
 
-function ArchivedReplay({ gameId, event, onClose }: { gameId: string; event: EventItem; onClose: () => void }) {
+function ArchivedReplay({ gameId, game, event, onClose }: { gameId: string; game?: Game; event: EventItem; onClose: () => void }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const decoderRef = useRef<VideoDecoder | undefined>(undefined);
   const audioContextRef = useRef<AudioContext | undefined>(undefined);
@@ -424,30 +424,87 @@ function ArchivedReplay({ gameId, event, onClose }: { gameId: string; event: Eve
   const [retry, setRetry] = useState(0);
   const [playableFrames, setPlayableFrames] = useState<any[]>([]);
 
-  const downloadClip = () => {
+  const downloadClip = async () => {
     if (!playableFrames.length) return;
-    const firstAudio = playableFrames.find(f => f.type === 'audio');
-    const muxer = new Muxer({
-      target: new ArrayBufferTarget(),
-      video: { codec: 'avc', width: 1280, height: 720 },
-      audio: firstAudio && firstAudio.sampleRate && firstAudio.channels ? {
-        codec: 'aac',
-        sampleRate: firstAudio.sampleRate,
-        numberOfChannels: firstAudio.channels,
-      } : undefined,
-      firstTimestampBehavior: 'offset',
-      fastStart: 'in-memory',
-    });
-    for (const frame of playableFrames) {
-      if (frame.type === 'video') muxer.addVideoChunk(new EncodedVideoChunk({ type: frame.keyframe ? 'key' : 'delta', timestamp: frame.timestampUs, data: frame.payload }));
-      else if (frame.type === 'audio') muxer.addAudioChunk(new EncodedAudioChunk({ type: 'key', timestamp: frame.timestampUs, data: frame.payload }));
+    setLoading(true);
+    try {
+      const firstAudio = playableFrames.find(f => f.type === 'audio');
+      const muxer = new Muxer({
+        target: new ArrayBufferTarget(),
+        video: { codec: 'avc', width: 1280, height: 720 },
+        audio: firstAudio && firstAudio.sampleRate && firstAudio.channels ? {
+          codec: 'aac', sampleRate: firstAudio.sampleRate, numberOfChannels: firstAudio.channels,
+        } : undefined,
+        firstTimestampBehavior: 'offset',
+        fastStart: 'in-memory',
+      });
+
+      const canvas = new OffscreenCanvas(1280, 720);
+      const ctx = canvas.getContext('2d')!;
+      
+      let encodeError: Error | undefined;
+      const encoder = new VideoEncoder({
+        output: (chunk, metadata) => {
+          if (metadata?.decoderConfig) muxer.addVideoChunk(chunk, metadata);
+          else muxer.addVideoChunk(chunk);
+        },
+        error: (e) => { encodeError = e; }
+      });
+      encoder.configure({ codec: 'avc1.42E01E', width: 1280, height: 720, bitrate: 2_500_000, framerate: 30, hardwareAcceleration: 'prefer-hardware' });
+
+      let decodeResolve: () => void;
+      let decodePromise = new Promise<void>((r) => { decodeResolve = r; });
+      let pendingFrames = 0;
+      let decodedCount = 0;
+      const videoFrames = playableFrames.filter(f => f.type === 'video');
+      
+      const decoder = new VideoDecoder({
+        output: async (frame) => {
+          pendingFrames++;
+          ctx.clearRect(0, 0, 1280, 720);
+          ctx.drawImage(frame, 0, 0, 1280, 720);
+          
+          ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
+          ctx.fillRect(40, 40, 480, 60);
+          ctx.fillStyle = '#fff';
+          ctx.font = 'bold 28px sans-serif';
+          ctx.fillText(`${game?.homeTeam ?? 'Home'} vs ${game?.awayTeam ?? 'Away'}`, 60, 80);
+          
+          const newFrame = new VideoFrame(canvas, { timestamp: frame.timestamp });
+          while (encoder.encodeQueueSize > 5) await new Promise(r => setTimeout(r, 10)); // Backpressure
+          encoder.encode(newFrame, { keyFrame: decodedCount % 60 === 0 });
+          newFrame.close();
+          frame.close();
+          decodedCount++;
+          pendingFrames--;
+          if (decodedCount === videoFrames.length) decodeResolve();
+        },
+        error: (e) => { encodeError = e; decodeResolve(); }
+      });
+      decoder.configure({ codec: 'avc1.42E01E' });
+
+      for (const frame of playableFrames) {
+        if (frame.type === 'video') decoder.decode(new EncodedVideoChunk({ type: frame.keyframe ? 'key' : 'delta', timestamp: frame.timestampUs, data: frame.payload }));
+        else if (frame.type === 'audio') muxer.addAudioChunk(new EncodedAudioChunk({ type: 'key', timestamp: frame.timestampUs, data: frame.payload }));
+      }
+      
+      await decoder.flush();
+      await decodePromise;
+      await encoder.flush();
+      if (encodeError) throw encodeError;
+      
+      muxer.finalize();
+      const blob = new Blob([muxer.target.buffer], { type: 'video/mp4' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = `clip-${event.id}.mp4`;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+    } catch (cause) {
+      console.error(cause);
+      setError('Failed to process download overlay.');
+    } finally {
+      setLoading(false);
     }
-    muxer.finalize();
-    const blob = new Blob([muxer.target.buffer], { type: 'video/mp4' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = `clip-${event.id}.mp4`;
-    document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
   };
 
   useEffect(() => {
@@ -837,7 +894,7 @@ function App() {
     {isPublisher ? <section className="replay-message">Browser publishing does not archive footage. Use the Android broadcaster for saved video and replay after reload.</section> : null}
     <section className={`stage ${fullScreenFallback ? 'stage-fallback-fullscreen' : ''}`} ref={stageRef}>
       {game?.status === 'ended' ? <div className="video-placeholder"><div className="play-orb">✓</div><p>Game ended · timeline and saved moments remain available.</p></div> : relayUrl && broadcastName ? isPublisher ? <moq-publish-ui><moq-publish url={relayUrl} name={broadcastName} source="camera"><video muted autoPlay playsInline /></moq-publish></moq-publish-ui> : <Draft16Camera relayUrl={relayUrl} broadcastName={broadcastName} capabilityIdentity={capabilityIdentity} onRewindReady={registerRewind} replayActive={replayActive} onReplayState={handleReplayState} audioMuted={audioMuted} /> : <div className="video-placeholder"><div className="play-orb">▶</div><p>{isPublisher ? 'Requesting camera publishing capability…' : 'Requesting live viewing capability…'}</p></div>}
-      {archivedEvent ? <ArchivedReplay gameId={canonicalGameId || gameId} event={archivedEvent} onClose={() => { setArchivedEvent(undefined); setReplaying(undefined); }} /> : null}
+      {archivedEvent ? <ArchivedReplay gameId={canonicalGameId || gameId} game={game} event={archivedEvent} onClose={() => { setArchivedEvent(undefined); setReplaying(undefined); }} /> : null}
       <div className="stage-overlay"><div className="stage-overlay-score"><b>{game?.homeTeam ?? 'HOME'} {game?.homeScore ?? '—'} · {game?.awayScore ?? '—'} {game?.awayTeam ?? 'AWAY'}</b><span>{clock}</span></div><div className="stage-overlay-actions">{saveStatus ? <span className="stage-save-status" role="status">{saveStatus}</span> : null}{!isPublisher ? <><button onClick={() => { setReplayActive(false); setArchivedEvent(undefined); setReplaying(undefined); setReplayMessage(''); }}>● LIVE</button><button disabled={saveDisabled} onClick={() => void saveMoment()}>☆ SAVE</button><button onClick={() => setAudioMuted((muted) => !muted)}>{audioMuted ? '🔇' : '🔊'}</button></> : null}<button onClick={() => void toggleFullScreen()} aria-label={fullScreen ? 'Exit fullscreen video' : 'Fullscreen video'}>{fullScreen ? '↙ EXIT' : '⛶ FULLSCREEN'}</button></div></div>
     </section>
     <section className="scoreboard"><div><span>{game?.homeTeam ?? 'HOME'}</span><strong>{game?.homeScore ?? '—'}</strong></div><div className="clock"><small>1ST HALF</small><strong>{clock}</strong></div><div><span>{game?.awayTeam ?? 'AWAY'}</span><strong>{game?.awayScore ?? '—'}</strong></div></section>
