@@ -91,14 +91,8 @@ export default function App() {
     }
   };
 
-  const startLive = async () => {
-    if (!cameraReady) return Alert.alert('Camera is still starting', 'Wait for the preview, then try again.');
-    if (Platform.OS === 'android') {
-      const microphone = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.RECORD_AUDIO);
-      if (microphone !== PermissionsAndroid.RESULTS.GRANTED) return Alert.alert('Microphone access is required', 'Allow microphone access to include field audio in the live broadcast.');
-    }
+  const prepareGame = async () => {
     setIsSaving(true);
-    setIsConnecting(true);
     let started: RemoteGame;
     try {
       if (setupMode === 'join' && joinGameCode.trim()) {
@@ -116,22 +110,31 @@ export default function App() {
       applyRemoteGame(started);
     } catch (cause) {
       Alert.alert('Backend connection failed', cause instanceof Error ? cause.message : 'The game API could not be reached.');
+    } finally {
       setIsSaving(false);
-      setIsConnecting(false);
-      return;
     }
+  };
+
+  const startLive = async () => {
+    if (!gameId) return Alert.alert('No game', 'Please prepare a game first.');
+    if (!cameraReady) return Alert.alert('Camera is still starting', 'Wait for the preview, then try again.');
+    if (Platform.OS === 'android') {
+      const microphone = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.RECORD_AUDIO);
+      if (microphone !== PermissionsAndroid.RESULTS.GRANTED) return Alert.alert('Microphone access is required', 'Allow microphone access to include field audio in the live broadcast.');
+    }
+    setIsConnecting(true);
     try {
-      const capability = await api.mediaCapability(started.gameId, 'publisher');
-      console.info('[bleachers:capability]', { gameId: started.gameId, role: 'publisher', relayOrigin: new URL(capability.relayUrl).origin, capabilityIdentity: capability.capabilityIdentity, broadcastName: capability.broadcastName });
+      const capability = await api.mediaCapability(gameId, 'publisher');
+      console.info('[bleachers:capability]', { gameId, role: 'publisher', relayOrigin: new URL(capability.relayUrl).origin, capabilityIdentity: capability.capabilityIdentity, broadcastName: capability.broadcastName });
       moqSession.current = await connectCloudflareMoq(capability.relayUrl, capability.broadcastName, capability.capabilityIdentity);
       setIsLive(true);
       liveRef.current = true;
       await new Promise<void>((resolve) => setTimeout(resolve, 250));
       await BleachersCamera.start(1280, 720, 24, 1_200_000);
       await BleachersCamera.startAudio();
-      archiveRef.current = new MediaArchive(started.gameId, getOrganizerSecret());
+      archiveRef.current = new MediaArchive(gameId, getOrganizerSecret());
       
-      void pumpH264(() => moqSession.current, () => reconnectMoq(started.gameId), () => liveRef.current, archiveRef.current).catch((cause) => {
+      void pumpH264(() => moqSession.current, () => reconnectMoq(gameId), () => liveRef.current, archiveRef.current).catch((cause) => {
         console.error('[bleachers:h264-pump-fatal]', cause instanceof Error ? cause.message : String(cause));
       });
       void pumpAac(() => moqSession.current, () => liveRef.current, archiveRef.current).catch((cause) => console.error('[bleachers:aac-pump-fatal]', cause instanceof Error ? cause.message : String(cause)));
@@ -145,7 +148,7 @@ export default function App() {
       setIsLive(false);
       const detail = cause instanceof Error ? cause.message : 'The relay rejected the publisher session.';
       Alert.alert('MoQ relay connection failed', detail);
-    } finally { setIsSaving(false); setIsConnecting(false); }
+    } finally { setIsConnecting(false); }
   };
   const endLive = async () => {
     await BleachersCamera.stop().catch(() => undefined);
@@ -191,15 +194,32 @@ export default function App() {
           {(!isLive || hudVisible) && <View><Text style={styles.eyebrow}>SOCCER · FIELD 1</Text><Text style={styles.connection}>{isConnecting ? 'CONNECTING TO MOQ…' : isLive ? `LIVE · ${gameId?.slice(0, 6)}` : 'NOT LIVE'}</Text></View>}
           <Pressable accessibilityLabel={isLive ? 'Toggle HUD' : 'Flip camera'} style={[styles.flipButton, isLive && styles.hudToggle]} onPress={() => isLive ? setHudVisible((visible) => !visible) : setFacing((value) => value === 'back' ? 'front' : 'back')}><Text style={isLive ? styles.hudLabel : styles.flipButtonText}>{isLive ? 'HUD' : '↻'}</Text></Pressable>
         </View>
-        {(!isLive || hudVisible) && <View style={[styles.scoreboard, isLive && styles.liveScoreboard, { padding: 8, marginTop: 8, borderRadius: 10 }]}>
-          <View style={styles.teamScore}><Text style={styles.teamName}>{homeTeam.toUpperCase()}</Text><Text style={[styles.score, { fontSize: 34 }]}>{homeScore}</Text></View>
-          <View style={styles.clockColumn}><Text style={styles.period}>1ST HALF</Text><Text style={[styles.clock, { fontSize: 22 }]}>{formatClock(elapsedSeconds)}</Text><Pressable onPress={() => { if (gameId) void api.command(gameId, { kind: 'CLOCK', running: !isClockRunning, clockSeconds: elapsedSeconds }).then(applyRemoteGame).catch(() => Alert.alert('Clock was not updated', 'Check your connection.')); else setIsClockRunning((running) => !running); }}><Text style={styles.clockAction}>{isClockRunning ? 'PAUSE CLOCK' : 'START CLOCK'}</Text></Pressable></View>
-          <View style={styles.teamScore}><Text style={styles.teamName}>{awayTeam.toUpperCase()}</Text><Text style={[styles.score, { fontSize: 34 }]}>{awayScore}</Text></View>
-        </View>}
-        
-        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1 }}>
-          <View style={styles.spacer} />
-          {!isLive && (
+        {gameId ? (
+          <>
+            {(!isLive || hudVisible) && <View style={[styles.scoreboard, isLive && styles.liveScoreboard, { padding: 8, marginTop: 8, borderRadius: 10 }]}>
+              <View style={styles.teamScore}><Text style={styles.teamName}>{homeTeam.toUpperCase()}</Text><Text style={[styles.score, { fontSize: 34 }]}>{homeScore}</Text></View>
+              <View style={styles.clockColumn}><Text style={styles.period}>1ST HALF</Text><Text style={[styles.clock, { fontSize: 22 }]}>{formatClock(elapsedSeconds)}</Text><Pressable onPress={() => { if (gameId) void api.command(gameId, { kind: 'CLOCK', running: !isClockRunning, clockSeconds: elapsedSeconds }).then(applyRemoteGame).catch(() => Alert.alert('Clock was not updated', 'Check your connection.')); else setIsClockRunning((running) => !running); }}><Text style={styles.clockAction}>{isClockRunning ? 'PAUSE CLOCK' : 'START CLOCK'}</Text></Pressable></View>
+              <View style={styles.teamScore}><Text style={styles.teamName}>{awayTeam.toUpperCase()}</Text><Text style={[styles.score, { fontSize: 34 }]}>{awayScore}</Text></View>
+            </View>}
+            
+            <View style={styles.spacer} />
+
+            {(!isLive || hudVisible) && <View style={[styles.controls, styles.liveControls]}>
+              <View style={[styles.goalRow, !isLive && { marginTop: 12 }]}>
+                <Pressable style={[styles.eventButton, styles.goalButton, isLive && styles.liveEventButton, { paddingVertical: 10, borderRadius: 10 }]} onPress={() => addGoal('home')}><Text style={[styles.eventButtonText, { fontSize: 17 }]}>GOAL</Text><Text style={styles.eventSubtext}>{homeTeam.toUpperCase()}</Text></Pressable>
+                <Pressable style={[styles.eventButton, styles.goalButton, isLive && styles.liveEventButton, { paddingVertical: 10, borderRadius: 10 }]} onPress={() => addGoal('away')}><Text style={[styles.eventButtonText, { fontSize: 17 }]}>GOAL</Text><Text style={styles.eventSubtext}>{awayTeam.toUpperCase()}</Text></Pressable>
+              </View>
+              <View style={styles.secondaryRow}><EventButton compact={isLive} label="SAVE" onPress={() => addEvent('SAVE')} /><EventButton compact={isLive} label="FOUL" onPress={() => addEvent('FOUL')} /><EventButton compact={isLive} label="HIGHLIGHT" onPress={() => addEvent('HIGHLIGHT')} /></View>
+              <Pressable disabled={isSaving || isConnecting} style={[styles.liveButton, isLive && styles.endButton, (isSaving || isConnecting) && styles.disabledButton, { paddingVertical: 10, borderRadius: 10 }]} onPress={() => isLive ? endLive() : startLive()}><View style={[styles.liveDot, isLive && styles.liveDotOn]} /><Text style={[styles.liveButtonText, { fontSize: 12 }]}>{isConnecting ? 'CONNECTING…' : isSaving ? 'UPDATING GAME…' : isLive ? 'END LIVE' : 'START LIVE'}</Text></Pressable>
+              {gameId && !!getOrganizerSecret() && <Pressable accessibilityLabel="Back up organizer access" onPress={() => void Share.share({ message: `Bleachers organizer access — keep private\nGame code: ${gameId.slice(0, 6)}\nOrganizer PIN: ${getOrganizerSecret()}` })}><Text style={styles.clockAction}>BACK UP ORGANIZER ACCESS</Text></Pressable>}
+            </View>}
+            
+            {!isLive && <ScrollView style={styles.eventFeed} contentContainerStyle={styles.eventFeedContent}>
+              {events.length === 0 ? <Text style={styles.emptyEvents}>Game events will appear here.</Text> : events.map((event) => <View key={event.id} style={styles.eventLine}><Text style={styles.eventKind}>{event.kind}</Text><Text style={styles.eventTime}>{formatClock(event.elapsedSeconds)}</Text></View>)}
+            </ScrollView>}
+          </>
+        ) : (
+          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1, justifyContent: 'center' }}>
             <View style={styles.setupCard}>
               <View style={styles.setupTabs}>
                 <Pressable onPress={() => setSetupMode('create')} style={[styles.setupTab, setupMode === 'create' && styles.setupTabActive]}><Text style={[styles.setupTabText, setupMode === 'create' && styles.setupTabTextActive]}>NEW GAME</Text></Pressable>
@@ -216,23 +236,10 @@ export default function App() {
                   <TextInput accessibilityLabel="Organizer PIN" autoCapitalize="characters" autoCorrect={false} placeholder="Organizer PIN" placeholderTextColor="#7EA28B" value={joinOrganizerSecret} onChangeText={setJoinOrganizerSecret} style={styles.gameCodeInput} />
                 </View>
               )}
+              <Pressable disabled={isSaving || isConnecting} style={[styles.liveButton, { marginTop: 24, paddingVertical: 14, borderRadius: 10 }, (isSaving || isConnecting) && styles.disabledButton]} onPress={prepareGame}><Text style={[styles.liveButtonText, { fontSize: 14 }]}>{isSaving ? 'PREPARING…' : 'CONTINUE'}</Text></Pressable>
             </View>
-          )}
-          <View style={styles.spacer} />
-        </KeyboardAvoidingView>
-
-        {(!isLive || hudVisible) && <View style={[styles.controls, styles.liveControls]}>
-          <View style={[styles.goalRow, !isLive && { marginTop: 12 }]}>
-            <Pressable style={[styles.eventButton, styles.goalButton, isLive && styles.liveEventButton, { paddingVertical: 10, borderRadius: 10 }]} onPress={() => addGoal('home')}><Text style={[styles.eventButtonText, { fontSize: 17 }]}>GOAL</Text><Text style={styles.eventSubtext}>{homeTeam.toUpperCase()}</Text></Pressable>
-            <Pressable style={[styles.eventButton, styles.goalButton, isLive && styles.liveEventButton, { paddingVertical: 10, borderRadius: 10 }]} onPress={() => addGoal('away')}><Text style={[styles.eventButtonText, { fontSize: 17 }]}>GOAL</Text><Text style={styles.eventSubtext}>{awayTeam.toUpperCase()}</Text></Pressable>
-          </View>
-          <View style={styles.secondaryRow}><EventButton compact={isLive} label="SAVE" onPress={() => addEvent('SAVE')} /><EventButton compact={isLive} label="FOUL" onPress={() => addEvent('FOUL')} /><EventButton compact={isLive} label="HIGHLIGHT" onPress={() => addEvent('HIGHLIGHT')} /></View>
-          <Pressable disabled={isSaving || isConnecting} style={[styles.liveButton, isLive && styles.endButton, (isSaving || isConnecting) && styles.disabledButton, { paddingVertical: 10, borderRadius: 10 }]} onPress={() => isLive ? endLive() : startLive()}><View style={[styles.liveDot, isLive && styles.liveDotOn]} /><Text style={[styles.liveButtonText, { fontSize: 12 }]}>{isConnecting ? 'CONNECTING…' : isSaving ? 'UPDATING GAME…' : isLive ? 'END LIVE' : 'START LIVE'}</Text></Pressable>
-          {gameId && !!getOrganizerSecret() && <Pressable accessibilityLabel="Back up organizer access" onPress={() => void Share.share({ message: `Bleachers organizer access — keep private\nGame code: ${gameId.slice(0, 6)}\nOrganizer PIN: ${getOrganizerSecret()}` })}><Text style={styles.clockAction}>BACK UP ORGANIZER ACCESS</Text></Pressable>}
-        </View>}
-        {!isLive && <ScrollView style={styles.eventFeed} contentContainerStyle={styles.eventFeedContent}>
-          {events.length === 0 ? <Text style={styles.emptyEvents}>Game events will appear here.</Text> : events.map((event) => <View key={event.id} style={styles.eventLine}><Text style={styles.eventKind}>{event.kind}</Text><Text style={styles.eventTime}>{formatClock(event.elapsedSeconds)}</Text></View>)}
-        </ScrollView>}
+          </KeyboardAvoidingView>
+        )}
       </SafeAreaView>
     </View>
   );
