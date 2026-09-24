@@ -35,7 +35,6 @@ export default function App() {
   const [isSaving, setIsSaving] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   const [hudVisible, setHudVisible] = useState(true);
-  const [hudVisible, setHudVisible] = useState(true);
   const [setupMode, setSetupMode] = useState<'create' | 'join'>('create');
   const [joinGameCode, setJoinGameCode] = useState('');
   const [joinOrganizerSecret, setJoinOrganizerSecret] = useState('');
