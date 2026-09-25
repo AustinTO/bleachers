@@ -858,6 +858,14 @@ function App() {
   const [canonicalGameId, setCanonicalGameId] = useState('');
   const [error, setError] = useState('');
   const [replaying, setReplaying] = useState<EventItem>();
+  const [user, setUser] = useState<User>();
+  const [showAuth, setShowAuth] = useState(false);
+
+  useEffect(() => {
+    fetch(`${API}/v1/users/me`, { credentials: 'include' })
+      .then(r => { if (r.ok) r.json().then(setUser); })
+      .catch(() => {});
+  }, []);
   const [archivedEvent, setArchivedEvent] = useState<EventItem>();
   const [saved, setSaved] = useState<Set<string>>(new Set());
   const [savedMoments, setSavedMoments] = useState<SavedMoment[]>([]);
@@ -941,7 +949,7 @@ function App() {
   useEffect(() => {
     if (!canonicalGameId) return;
     let cancelled = false;
-    fetch(`${API}/v1/games/${canonicalGameId}/moments?viewerSessionId=${encodeURIComponent(viewerSessionId)}`)
+    fetch(`${API}/v1/games/${canonicalGameId}/moments`, { credentials: 'include' })// ?viewerSessionId=${encodeURIComponent(viewerSessionId)}`)
       .then(async (response) => { if (!response.ok) throw new Error('Saved moments unavailable'); return response.json() as Promise<{ moments: SavedMoment[] }>; })
       .then(({ moments }) => { if (!cancelled) { setSavedMoments(moments); setSaved(new Set(moments.map((moment) => moment.event_id).filter((value): value is string => !!value))); } })
       .catch(() => { /* Live viewing remains available while saves are unavailable. */ });
@@ -1035,7 +1043,8 @@ function App() {
   if (!gameId) return <LandingPage />;
 
   return <main className="shell">
-    <header className="topbar"><div><span className="mark">BLEACHERS</span><span className="live-label">{isPublisher ? 'PUBLISHER' : game?.status === 'live' ? 'LIVE' : game?.status === 'ended' ? 'POSTGAME' : 'WAITING FOR GAME'}</span></div><div className="topbar-actions"><button className="share-link" onClick={() => void shareGame()}>SHARE</button><span className="privacy">PRIVATE GAME</span></div></header>
+    {showAuth && <AuthModal onClose={() => setShowAuth(false)} onLogin={(u) => { setUser(u); setShowAuth(false); }} />}
+    <header className="topbar"><div><span className="mark">BLEACHERS</span><span className="live-label">{isPublisher ? 'PUBLISHER' : game?.status === 'live' ? 'LIVE' : game?.status === 'ended' ? 'POSTGAME' : 'WAITING FOR GAME'}</span></div><div className="topbar-actions"><button className="share-link" onClick={() => void shareGame()}>SHARE</button>{user ? <span className="privacy">{user.email}</span> : <button className="share-link" onClick={() => setShowAuth(true)}>SIGN IN</button>}<span className="privacy">PRIVATE GAME</span></div></header>
     {shareMessage ? <p className="replay-message" role="status">{shareMessage}</p> : null}
     {error ? <section className="error">{error}</section> : null}
     {isPublisher ? <section className="replay-message">Browser publishing does not archive footage. Use the Android broadcaster for saved video and replay after reload.</section> : null}
@@ -1074,7 +1083,7 @@ function App() {
       <section className="tab-content timeline">
         <div className="timeline-head"><h2>My saved moments</h2><span>{savedMoments.length} saved</span></div>
         {savedMoments.length ? savedMoments.map((moment) => <TimelineEventItem key={moment.id} event={{ id: moment.id, sequence: 0, kind: 'HIGHLIGHT', gameTimeSeconds: moment.game_time_seconds, createdAt: new Date(moment.media_at_ms).toISOString() }} game={game} gameId={canonicalGameId || gameId} onPlay={() => playReplay({ id: moment.id, sequence: 0, kind: 'HIGHLIGHT', gameTimeSeconds: moment.game_time_seconds, createdAt: new Date(moment.media_at_ms).toISOString() })} isMoment={true} momentReady={moment.media_ready} />) : <p className="muted">No moments saved yet. Click the ☆ SAVE MOMENT button during the game.</p>}
-        <p className="muted" style={{ marginTop: '24px' }}>Saved times stay with this browser. Archived video can play after the game ends.</p>
+        {!user ? <div style={{ marginTop: '24px', padding: '16px', background: 'rgba(255,255,255,0.05)', borderRadius: '12px', textAlign: 'center' }}><p style={{ margin: '0 0 12px 0' }}>Sign in to save your moments permanently across all your devices.</p><button onClick={() => setShowAuth(true)} style={{ background: 'var(--accent)', color: '#000', padding: '8px 16px', borderRadius: '8px', fontWeight: 'bold', border: 'none', cursor: 'pointer' }}>Sign In</button></div> : <p className="muted" style={{ marginTop: '24px' }}>Your moments are permanently saved to your account.</p>}
       </section>
     )}
 
@@ -1339,6 +1348,83 @@ function TimelineEventItem({ event, gameId, game, onPlay, isMoment = false, mome
           </button>
         )}
         <span style={{ padding: '0 8px' }}>›</span>
+      </div>
+    </div>
+  );
+}
+
+type User = { id: string; email: string; name?: string; avatar_url?: string; created_at: string };
+
+function AuthModal({ onClose, onLogin }: { onClose: () => void, onLogin: (u: User) => void }) {
+  const [email, setEmail] = useState('');
+  const [code, setCode] = useState('');
+  const [step, setStep] = useState<'email' | 'code'>('email');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  const requestOtp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!email.includes('@')) return setError('Invalid email.');
+    setLoading(true); setError('');
+    try {
+      const res = await fetch(`${API}/v1/auth/request-code`, { method: 'POST', body: JSON.stringify({ email }) });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to send code.');
+      setStep('code');
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const verifyOtp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (code.length < 6) return setError('Invalid code.');
+    setLoading(true); setError('');
+    try {
+      const res = await fetch(`${API}/v1/auth/verify`, { method: 'POST', body: JSON.stringify({ email, code }) });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Invalid code.');
+      
+      const meRes = await fetch(`${API}/v1/users/me`, { credentials: 'include' });
+      if (meRes.ok) {
+        onLogin(await meRes.json());
+        
+        // Merge anonymous saves
+        const viewerSessionId = localStorage.getItem('viewer_session_id');
+        if (viewerSessionId) {
+          fetch(`${API}/v1/auth/merge`, { credentials: 'include', method: 'POST', body: JSON.stringify({ viewerSessionId }) }).catch(console.error);
+        }
+      }
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="archived-replay" style={{ zIndex: 100 }} onClick={onClose}>
+      <div className="setup-card" style={{ maxWidth: 400, width: '90%' }} onClick={e => e.stopPropagation()}>
+        <h2>Sign In</h2>
+        <p className="muted" style={{ marginBottom: 24 }}>Save your moments permanently and broadcast games.</p>
+        
+        {error && <div style={{ color: '#ff4444', marginBottom: 16, fontSize: 14 }}>{error}</div>}
+        
+        {step === 'email' ? (
+          <form onSubmit={requestOtp} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+            <input type="email" placeholder="Email address" value={email} onChange={e => setEmail(e.target.value)} required style={{ padding: '12px 16px', borderRadius: 8, border: '1px solid rgba(255,255,255,0.1)', background: 'rgba(0,0,0,0.4)', color: 'white', fontSize: 16 }} />
+            <button type="submit" disabled={loading} style={{ background: 'var(--accent)', color: '#000', padding: '12px', borderRadius: 8, fontSize: 16, fontWeight: 'bold' }}>{loading ? 'Sending...' : 'Send Login Code'}</button>
+          </form>
+        ) : (
+          <form onSubmit={verifyOtp} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+            <p className="muted" style={{ fontSize: 14, margin: 0 }}>Code sent to {email}</p>
+            <input type="text" placeholder="6-digit code" value={code} onChange={e => setCode(e.target.value)} required maxLength={6} style={{ padding: '12px 16px', borderRadius: 8, border: '1px solid rgba(255,255,255,0.1)', background: 'rgba(0,0,0,0.4)', color: 'white', fontSize: 24, textAlign: 'center', letterSpacing: 8 }} />
+            <button type="submit" disabled={loading} style={{ background: 'var(--accent)', color: '#000', padding: '12px', borderRadius: 8, fontSize: 16, fontWeight: 'bold' }}>{loading ? 'Verifying...' : 'Verify & Sign In'}</button>
+            <button type="button" onClick={() => setStep('email')} style={{ background: 'transparent', color: 'white', opacity: 0.7, padding: '8px', border: 'none', cursor: 'pointer' }}>Back</button>
+          </form>
+        )}
       </div>
     </div>
   );

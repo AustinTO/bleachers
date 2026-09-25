@@ -1,4 +1,6 @@
 import { DurableObject } from 'cloudflare:workers';
+import { requestAuthCode, verifyAuthCode, mergeAuth, getMe } from "./auth";
+import { createOrganization, createTeam, getMyOrganizationsAndTeams } from "./teams";
 
 export interface Env {
   DB: D1Database;
@@ -13,6 +15,7 @@ export interface Env {
   MOQ_PROFILE?: string;
   /** Unused; draft selection is implied by MOQ_PROFILE. */
   MOQ_DRAFT?: string;
+  EMAIL?: any;
 }
 
 type TeamSide = 'home' | 'away';
@@ -42,11 +45,13 @@ type GameSnapshot = {
 
 const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8' };
 
-const cors = (response: Response) => {
+const cors = (response: Response, request?: Request) => {
   const headers = new Headers(response.headers);
-  headers.set('access-control-allow-origin', '*');
+  const origin = request?.headers.get('origin') || '*';
+  headers.set('access-control-allow-origin', origin);
+  if (origin !== '*') headers.set('access-control-allow-credentials', 'true');
   headers.set('access-control-allow-methods', 'GET,POST,OPTIONS');
-  headers.set('access-control-allow-headers', 'content-type, authorization, x-capture-start-ms, x-capture-end-ms');
+  headers.set('access-control-allow-headers', 'content-type, authorization, x-capture-start-ms, x-capture-end-ms, x-user-id');
   return new Response(response.body, { status: response.status, headers });
 };
 
@@ -168,17 +173,24 @@ export class GameState extends DurableObject<Env> {
 
 export default {
   async fetch(request, env): Promise<Response> {
-    if (request.method === 'OPTIONS') return cors(new Response(null, { status: 204 }));
+    if (request.method === 'OPTIONS') return cors(new Response(null, { status: 204 }), request);
     const url = new URL(request.url);
     const parts = url.pathname.split('/').filter(Boolean);
     let response: Response;
 
     if (request.method === 'GET' && url.pathname === '/health') response = json({ ok: true, service: 'bleachers-api' });
     else if (request.method === 'POST' && url.pathname === '/v1/games') response = await createGame(request, env);
+    else if (request.method === 'POST' && url.pathname === '/v1/auth/request-code') response = await requestAuthCode(request, env);
+    else if (request.method === 'POST' && url.pathname === '/v1/auth/verify') response = await verifyAuthCode(request, env);
+    else if (request.method === 'POST' && url.pathname === '/v1/auth/merge') response = await mergeAuth(request, env);
+    else if (request.method === 'GET' && url.pathname === '/v1/users/me') response = await getMe(request, env);
+    else if (request.method === 'POST' && url.pathname === '/v1/organizations') response = await createOrganization(request, env);
+    else if (request.method === 'POST' && url.pathname === '/v1/teams') response = await createTeam(request, env);
+    else if (request.method === 'GET' && url.pathname === '/v1/users/me/organizations') response = await getMyOrganizationsAndTeams(request, env);
     else if (parts[0] === 'v1' && parts[1] === 'games' && parts[2]) response = await gameRoute(request, env, parts[2], parts.slice(3));
     else if (request.method === 'GET' && parts[0] === 'v1' && parts[1] === 'teams' && parts[2] && parts[3] === 'games') response = await teamGamesRoute(request, env, parts[2]);
     else response = error('not_found', 404);
-    return cors(response);
+    return cors(response, request);
   },
   async scheduled(event, env, ctx) {
     const cutoffMs = Date.now() - 7 * 24 * 60 * 60 * 1000;
