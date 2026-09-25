@@ -767,30 +767,110 @@ function formatOrganizerPin(secret: string) {
   return compact.length === 8 ? `${compact.slice(0, 4)}-${compact.slice(4)}` : secret;
 }
 
-function OrganizerSetup() {
+function OrganizerDashboard({ user, onShowAuth }: { user?: User; onShowAuth: () => void }) {
   const [homeTeam, setHomeTeam] = useState('');
   const [awayTeam, setAwayTeam] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [createdGame, setCreatedGame] = useState<string>();
   const [createdSecret, setCreatedSecret] = useState('');
+  
+  const [teams, setTeams] = useState<any[]>([]);
+  const [games, setGames] = useState<any[]>([]);
+  const [selectedTeam, setSelectedTeam] = useState<string>();
+  const [loadingTeams, setLoadingTeams] = useState(false);
+
   useEffect(() => {
     if (!createdGame) return;
     const timer = window.setTimeout(() => { window.location.href = `/?game=${createdGame}&mode=organize#secret=${createdSecret}`; }, 1_800);
     return () => window.clearTimeout(timer);
   }, [createdGame, createdSecret]);
+
+  useEffect(() => {
+    if (user) {
+      setLoadingTeams(true);
+      fetch(`${API}/v1/users/me/organizations`, { credentials: 'include' })
+        .then(r => r.json())
+        .then((data: any) => {
+          if (data.organizations?.length > 0) {
+            const allTeams = data.organizations.flatMap((o: any) => o.teams);
+            setTeams(allTeams);
+            if (allTeams.length > 0) setSelectedTeam(allTeams[0].id);
+          }
+        })
+        .finally(() => setLoadingTeams(false));
+    }
+  }, [user]);
+
+  useEffect(() => {
+    if (user && selectedTeam) {
+      fetch(`${API}/v1/teams/${selectedTeam}/games`, { credentials: 'include' })
+        .then(r => r.json())
+        .then((data: any) => {
+          setGames(data.games || []);
+        });
+    }
+  }, [user, selectedTeam]);
+
   const createGame = async (event: React.FormEvent) => {
     event.preventDefault();
     setBusy(true); setError('');
     try {
-      const response = await fetch(`${API}/v1/games`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ homeTeam, awayTeam }) });
+      const response = await fetch(`${API}/v1/games`, { 
+        method: 'POST', 
+        headers: { 'content-type': 'application/json' }, 
+        body: JSON.stringify({ homeTeam, awayTeam, teamId: selectedTeam }) 
+      });
       if (!response.ok) throw new Error('Game could not be created');
       const payload = await response.json() as { game: { gameId: string }; organizerSecret: string };
       setCreatedSecret(payload.organizerSecret);
       setCreatedGame(payload.game.gameId);
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Game could not be created'); setBusy(false); }
   };
-  return <main className="shell setup-shell"><header className="topbar"><span className="mark">BLEACHERS</span><span className="privacy">PRIVATE SETUP</span></header><section className="setup-card"><span className="tag">SOCCER GAME</span><h1>Create a private game</h1><p className="muted">Create a game, then share the viewer link. On the broadcaster, type the game code and organizer PIN.</p>{createdGame ? <div className="created-game"><span className="join-label">Game code</span><strong>{createdGame.slice(0, 6)}</strong><span className="join-label">Organizer PIN</span><strong className="join-pin">{formatOrganizerPin(createdSecret)}</strong><code>{location.origin}/?game={createdGame}</code><button className="live-button" onClick={() => { window.location.href = `/?game=${createdGame}&mode=organize#secret=${createdSecret}`; }}>OPEN ORGANIZER</button><p className="muted">Save the organizer link separately. Anyone with that link can control the game.</p></div> : <form onSubmit={createGame}><label>Home team<input value={homeTeam} onChange={(event) => setHomeTeam(event.target.value)} required /></label><label>Away team<input value={awayTeam} onChange={(event) => setAwayTeam(event.target.value)} required /></label>{error ? <p className="error">{error}</p> : null}<button className="live-button" disabled={busy}>{busy ? 'CREATING…' : 'CREATE PRIVATE GAME'}</button></form>}</section></main>;
+
+  if (!user) {
+    return <main className="shell setup-shell"><header className="topbar"><span className="mark">BLEACHERS</span><span className="privacy">ORGANIZER</span></header><section className="setup-card" style={{ textAlign: 'center' }}><span className="tag">ORGANIZER DASHBOARD</span><h1>Sign in to manage your teams</h1><p className="muted">Log in to view scheduled games, create teams, and manage live broadcasts.</p><button className="live-button" onClick={onShowAuth}>SIGN IN</button><div style={{ marginTop: '32px' }}><h3>Or create an anonymous game</h3><form onSubmit={createGame}><label>Home team<input value={homeTeam} onChange={(event) => setHomeTeam(event.target.value)} required /></label><label>Away team<input value={awayTeam} onChange={(event) => setAwayTeam(event.target.value)} required /></label>{error ? <p className="error">{error}</p> : null}<button disabled={busy}>{busy ? 'CREATING…' : 'CREATE ANONYMOUS GAME'}</button></form></div>{createdGame && <div className="created-game"><span>Redirecting to {createdGame}...</span></div>}</section></main>;
+  }
+
+  return <main className="shell setup-shell"><header className="topbar"><span className="mark">BLEACHERS</span><span className="privacy">{user.email}</span></header>
+    <section className="setup-card">
+      <span className="tag">DASHBOARD</span>
+      <h1>Your Teams & Games</h1>
+      {loadingTeams ? <p>Loading teams...</p> : 
+       teams.length === 0 ? <p className="muted">You are not a member of any teams yet.</p> :
+       <>
+         <label>Select Team
+           <select value={selectedTeam} onChange={e => setSelectedTeam(e.target.value)} style={{ padding: '8px', background: 'rgba(0,0,0,0.5)', color: 'white', borderRadius: '4px', border: '1px solid rgba(255,255,255,0.1)', width: '100%', marginBottom: '16px' }}>
+             {teams.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+           </select>
+         </label>
+         
+         {games.length > 0 ? (
+           <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '24px' }}>
+             {games.map(g => (
+               <div key={g.gameId} style={{ display: 'flex', justifyContent: 'space-between', padding: '12px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px' }}>
+                 <div>
+                   <strong>{g.homeTeam} vs {g.awayTeam}</strong>
+                   <div style={{ fontSize: '12px', color: 'rgba(255,255,255,0.5)' }}>{new Date(g.createdAt).toLocaleDateString()}</div>
+                 </div>
+                 <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                   <span style={{ fontSize: '12px', textTransform: 'uppercase', color: g.status === 'live' ? 'var(--accent)' : 'inherit' }}>{g.status}</span>
+                   <button onClick={() => window.location.href = `/?game=${g.gameId}&mode=organize`} style={{ padding: '4px 12px', background: 'rgba(255,255,255,0.1)', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>Manage</button>
+                 </div>
+               </div>
+             ))}
+           </div>
+         ) : <p className="muted" style={{ marginBottom: '24px' }}>No games scheduled for this team.</p>}
+       </>
+      }
+
+      <div style={{ background: 'rgba(255,255,255,0.02)', padding: '16px', borderRadius: '8px' }}>
+        <h3 style={{ marginTop: 0 }}>Schedule a manual game</h3>
+        {createdGame ? <div className="created-game"><span className="join-label">Game code</span><strong>{createdGame.slice(0, 6)}</strong><span className="join-label">Organizer PIN</span><strong className="join-pin">{formatOrganizerPin(createdSecret)}</strong><code>{location.origin}/?game={createdGame}</code><button className="live-button" onClick={() => { window.location.href = `/?game=${createdGame}&mode=organize#secret=${createdSecret}`; }}>OPEN ORGANIZER</button></div> : 
+        <form onSubmit={createGame}><label>Home team<input value={homeTeam} onChange={(event) => setHomeTeam(event.target.value)} required /></label><label>Away team<input value={awayTeam} onChange={(event) => setAwayTeam(event.target.value)} required /></label>{error ? <p className="error">{error}</p> : null}<button className="live-button" disabled={busy || (!selectedTeam && teams.length > 0)}>{busy ? 'CREATING…' : 'CREATE PRIVATE GAME'}</button></form>}
+      </div>
+    </section>
+  </main>;
 }
 
 function OrganizerControls({ game, gameId, secret, onChange }: { game: Game; gameId: string; secret: string; onChange: (game: Game) => void }) {
@@ -1041,7 +1121,10 @@ function App() {
   }, [game, gameId, canonicalGameId, viewerSessionId, saveDisabled, selectedEvent]);
 
   if (teamNameParam) return <TeamProfile teamName={teamNameParam} />;
-  if (!gameId && params.get('mode') === 'setup') return <OrganizerSetup />;
+  if (!gameId && params.get('mode') === 'setup') return <>
+    {showAuth && <AuthModal onClose={() => setShowAuth(false)} onLogin={(u) => { setUser(u); setShowAuth(false); }} />}
+    <OrganizerDashboard user={user} onShowAuth={() => setShowAuth(true)} />
+  </>;
   if (!gameId) return <LandingPage />;
 
   return <main className="shell">

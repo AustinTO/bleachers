@@ -75,10 +75,13 @@ export async function getMe(request: Request, env: Env): Promise<Response> {
 }
 
 export async function authMiddleware(request: Request, env: Env): Promise<string | null> {
-  const cookieHeader = request.headers.get('Cookie') || '';
-  const match = cookieHeader.match(/session=([^;]+)/);
-  if (!match) return null;
-  const token = match[1];
+  let token = request.headers.get('authorization')?.match(/^Bearer (.+)$/i)?.[1];
+  if (!token) {
+    const cookieHeader = request.headers.get('Cookie') || '';
+    const match = cookieHeader.match(/session=([^;]+)/);
+    if (match) token = match[1];
+  }
+  if (!token) return null;
   const session = await env.DB.prepare('SELECT user_id, expires_at FROM auth_sessions WHERE token = ?').bind(token).first<{ user_id: string; expires_at: number }>();
   if (!session || Date.now() > session.expires_at) return null;
   return session.user_id;

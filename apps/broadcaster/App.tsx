@@ -3,7 +3,8 @@ import { StatusBar } from 'expo-status-bar';
 import { useKeepAwake } from 'expo-keep-awake';
 import { useEffect, useRef, useState } from 'react';
 import { Alert, KeyboardAvoidingView, PermissionsAndroid, Platform, Pressable, SafeAreaView, ScrollView, Share, StyleSheet, Text, TextInput, View } from 'react-native';
-import { api, EventKind, RemoteGame, TeamSide, getOrganizerSecret, setOrganizerSecret } from './src/api';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { api, EventKind, RemoteGame, TeamSide, getOrganizerSecret, setOrganizerSecret, setAuthToken } from './src/api';
 import { connectCloudflareMoq, PROBE, type CloudflareMoqSession } from './src/cloudflareMoq';
 import BleachersCamera, { BleachersCameraPreview } from './modules/bleachers-camera';
 import { encodeAacFrame, encodeH264Frame } from './src/mediaEnvelope';
@@ -35,7 +36,79 @@ export default function App() {
   const [isSaving, setIsSaving] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   const [hudVisible, setHudVisible] = useState(true);
-  const [setupMode, setSetupMode] = useState<'create' | 'join'>('create');
+  const [appState, setAppState] = useState<'auth' | 'dashboard' | 'camera'>('auth');
+  const [email, setEmail] = useState('');
+  const [otp, setOtp] = useState('');
+  const [authStep, setAuthStep] = useState<'email' | 'otp'>('email');
+  const [teams, setTeams] = useState<any[]>([]);
+  const [games, setGames] = useState<any[]>([]);
+  const [selectedTeam, setSelectedTeam] = useState<string>();
+  const [isLoadingAuth, setIsLoadingAuth] = useState(false);
+
+  useEffect(() => {
+    AsyncStorage.getItem('authToken').then(token => {
+      if (token) {
+        setAuthToken(token);
+        setAppState('dashboard');
+        loadTeams();
+      }
+    });
+  }, []);
+
+  const loadTeams = async () => {
+    try {
+      const data = await api.getOrganizationsAndTeams();
+      if (data.organizations?.length > 0) {
+        const allTeams = data.organizations.flatMap((o: any) => o.teams);
+        setTeams(allTeams);
+        if (allTeams.length > 0) {
+          setSelectedTeam(allTeams[0].id);
+          loadGames(allTeams[0].id);
+        }
+      }
+    } catch (e) {
+      setAppState('auth');
+    }
+  };
+
+  const loadGames = async (teamId: string) => {
+    try {
+      const data = await api.getTeamGames(teamId);
+      setGames(data.games);
+    } catch (e) { console.warn(e); }
+  };
+
+  const handleRequestCode = async () => {
+    if (!email) return;
+    setIsLoadingAuth(true);
+    try {
+      await api.requestCode(email);
+      setAuthStep('otp');
+    } catch (e) { Alert.alert('Error', 'Could not request code'); }
+    setIsLoadingAuth(false);
+  };
+
+  const handleVerifyCode = async () => {
+    if (!otp) return;
+    setIsLoadingAuth(true);
+    try {
+      const token = await api.verifyCode(email, otp);
+      setAuthToken(token);
+      await AsyncStorage.setItem('authToken', token);
+      setAppState('dashboard');
+      loadTeams();
+    } catch (e) { Alert.alert('Error', 'Invalid code'); }
+    setIsLoadingAuth(false);
+  };
+
+  const handleLogout = async () => {
+    setAuthToken('');
+    await AsyncStorage.removeItem('authToken');
+    setAppState('auth');
+    setAuthStep('email');
+    setOtp('');
+  };
+
   const [joinGameCode, setJoinGameCode] = useState('');
   const [joinOrganizerSecret, setJoinOrganizerSecret] = useState('');
   const updateJoinGame = (value: string) => {
@@ -95,16 +168,12 @@ export default function App() {
     setIsSaving(true);
     let started: RemoteGame;
     try {
-      if (setupMode === 'join' && joinGameCode.trim()) {
-        if (!joinOrganizerSecret.trim()) throw new Error('Enter the organizer PIN to broadcast to an existing game.');
-        setOrganizerSecret(joinOrganizerSecret);
+      if (joinGameCode.trim()) {
         const existing = await api.getGame(joinGameCode.trim());
         if (existing.status === 'ended') throw new Error('That game has already ended. Create a new game or use another code.');
         started = existing.status === 'live' ? existing : await api.startGame(existing.gameId);
       } else {
-        if (!homeTeam.trim() || !awayTeam.trim()) throw new Error('Enter names for both teams to start a new game.');
-        const created = await api.createGame(homeTeam.trim(), awayTeam.trim());
-        started = await api.startGame(created.gameId);
+        throw new Error('No game selected');
       }
       setGameId(started.gameId);
       applyRemoteGame(started);
@@ -253,25 +322,45 @@ export default function App() {
               {events.length === 0 ? <Text style={styles.emptyEvents}>Game events will appear here.</Text> : events.map((event) => <View key={event.id} style={styles.eventLine}><Text style={styles.eventKind}>{event.kind}</Text><Text style={styles.eventTime}>{formatClock(event.elapsedSeconds)}</Text></View>)}
             </ScrollView>}
           </>
+        ) : appState === 'dashboard' ? (
+          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1, justifyContent: 'center' }}>
+            <View style={styles.setupCard}>
+              <View style={[styles.header, { paddingBottom: 16 }]}><Text style={styles.eyebrow}>YOUR TEAMS</Text><Pressable onPress={handleLogout}><Text style={styles.connection}>LOGOUT</Text></Pressable></View>
+              {teams.length === 0 ? <Text style={styles.emptyEvents}>No teams found.</Text> : (
+                <View style={styles.setupForm}>
+                  {teams.map(t => (
+                    <Pressable key={t.id} onPress={() => { setSelectedTeam(t.id); loadGames(t.id); }} style={[styles.secondaryButton, selectedTeam === t.id && { backgroundColor: 'rgba(143,245,175,0.15)' }]}>
+                      <Text style={[styles.secondaryButtonText, selectedTeam === t.id && { color: '#8FF5AF' }]}>{t.name}</Text>
+                    </Pressable>
+                  ))}
+                  
+                  <Text style={[styles.eyebrow, { marginTop: 16 }]}>SCHEDULED GAMES</Text>
+                  {games.length === 0 ? <Text style={styles.emptyEvents}>No games found.</Text> : games.map(g => (
+                    <Pressable key={g.gameId} onPress={() => { updateJoinGame(g.gameId); setJoinOrganizerSecret('dummy'); setAppState('camera'); }} style={[styles.setupForm, { backgroundColor: 'rgba(255,255,255,0.05)', padding: 12, borderRadius: 8 }]}>
+                      <Text style={{ color: 'white', fontWeight: 'bold' }}>{g.homeTeam} vs {g.awayTeam}</Text>
+                      <Text style={styles.eventTime}>{new Date(g.createdAt).toLocaleDateString()} - {g.status}</Text>
+                    </Pressable>
+                  ))}
+                </View>
+              )}
+              <Pressable disabled={isSaving || isConnecting} style={[styles.liveButton, { marginTop: 24, paddingVertical: 14, borderRadius: 10 }, (isSaving || isConnecting) && styles.disabledButton]} onPress={() => { if (joinGameCode) { setAppState('camera'); prepareGame(); } }}><Text style={[styles.liveButtonText, { fontSize: 14 }]}>{isSaving ? 'PREPARING…' : 'GO LIVE'}</Text></Pressable>
+            </View>
+          </KeyboardAvoidingView>
         ) : (
           <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1, justifyContent: 'center' }}>
             <View style={styles.setupCard}>
-              <View style={styles.setupTabs}>
-                <Pressable onPress={() => setSetupMode('create')} style={[styles.setupTab, setupMode === 'create' && styles.setupTabActive]}><Text style={[styles.setupTabText, setupMode === 'create' && styles.setupTabTextActive]}>NEW GAME</Text></Pressable>
-                <Pressable onPress={() => setSetupMode('join')} style={[styles.setupTab, setupMode === 'join' && styles.setupTabActive]}><Text style={[styles.setupTabText, setupMode === 'join' && styles.setupTabTextActive]}>JOIN GAME</Text></Pressable>
-              </View>
-              {setupMode === 'create' ? (
+              <Text style={[styles.permissionTitle, { marginBottom: 20, fontSize: 24 }]}>Broadcaster Login</Text>
+              {authStep === 'email' ? (
                 <View style={styles.setupForm}>
-                  <TextInput accessibilityLabel="Home team" placeholder="Home Team Name" placeholderTextColor="#7EA28B" value={homeTeam} onChangeText={setHomeTeam} style={styles.gameCodeInput} />
-                  <TextInput accessibilityLabel="Away team" placeholder="Away Team Name" placeholderTextColor="#7EA28B" value={awayTeam} onChangeText={setAwayTeam} style={styles.gameCodeInput} />
+                  <TextInput accessibilityLabel="Email" autoCapitalize="none" keyboardType="email-address" placeholder="Email Address" placeholderTextColor="#7EA28B" value={email} onChangeText={setEmail} style={styles.gameCodeInput} />
+                  <Pressable disabled={isLoadingAuth} style={[styles.liveButton, { marginTop: 10, paddingVertical: 14, borderRadius: 10 }, isLoadingAuth && styles.disabledButton]} onPress={handleRequestCode}><Text style={[styles.liveButtonText, { fontSize: 14 }]}>{isLoadingAuth ? 'SENDING…' : 'SEND CODE'}</Text></Pressable>
                 </View>
               ) : (
                 <View style={styles.setupForm}>
-                  <TextInput accessibilityLabel="Game code or organizer link" autoCapitalize="none" autoCorrect={false} placeholder="Game Code or Link" placeholderTextColor="#7EA28B" value={joinGameCode} onChangeText={updateJoinGame} style={styles.gameCodeInput} />
-                  <TextInput accessibilityLabel="Organizer PIN" autoCapitalize="characters" autoCorrect={false} placeholder="Organizer PIN" placeholderTextColor="#7EA28B" value={joinOrganizerSecret} onChangeText={setJoinOrganizerSecret} style={styles.gameCodeInput} />
+                  <TextInput accessibilityLabel="Login Code" keyboardType="number-pad" placeholder="6-digit code" placeholderTextColor="#7EA28B" value={otp} onChangeText={setOtp} style={styles.gameCodeInput} />
+                  <Pressable disabled={isLoadingAuth} style={[styles.liveButton, { marginTop: 10, paddingVertical: 14, borderRadius: 10 }, isLoadingAuth && styles.disabledButton]} onPress={handleVerifyCode}><Text style={[styles.liveButtonText, { fontSize: 14 }]}>{isLoadingAuth ? 'VERIFYING…' : 'VERIFY CODE'}</Text></Pressable>
                 </View>
               )}
-              <Pressable disabled={isSaving || isConnecting} style={[styles.liveButton, { marginTop: 24, paddingVertical: 14, borderRadius: 10 }, (isSaving || isConnecting) && styles.disabledButton]} onPress={prepareGame}><Text style={[styles.liveButtonText, { fontSize: 14 }]}>{isSaving ? 'PREPARING…' : 'CONTINUE'}</Text></Pressable>
             </View>
           </KeyboardAvoidingView>
         )}

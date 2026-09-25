@@ -1,5 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
-import { requestAuthCode, verifyAuthCode, mergeAuth, getMe } from "./auth";
+import { requestAuthCode, verifyAuthCode, mergeAuth, getMe, authMiddleware } from "./auth";
 import { createOrganization, createTeam, getMyOrganizationsAndTeams } from "./teams";
 import { bandAuthRoute } from "./band";
 
@@ -248,23 +248,38 @@ export default {
 } satisfies ExportedHandler<Env>;
 
 async function createGame(request: Request, env: Env) {
-  const input = await body<{ homeTeam?: string; awayTeam?: string }>(request);
+  const input = await body<{ homeTeam?: string; awayTeam?: string; teamId?: string }>(request);
   const homeTeam = input?.homeTeam?.trim();
   const awayTeam = input?.awayTeam?.trim();
+  const teamId = input?.teamId?.trim() || null;
+  
   if (!homeTeam || !awayTeam) return error('homeTeam_and_awayTeam_required', 400);
+
+  if (teamId) {
+    const userId = await authMiddleware(request, env);
+    if (!userId) return error('unauthorized', 401);
+    const membership = await env.DB.prepare("SELECT role FROM team_members WHERE team_id = ? AND user_id = ? AND role IN ('owner', 'admin', 'coach', 'broadcaster')").bind(teamId, userId).first<{ role: string }>();
+    if (!membership) return error('unauthorized', 403);
+  }
+
   const gameId = id();
   const organizerSecret = organizerPin();
   const createdAt = new Date().toISOString();
-  await env.DB.prepare('INSERT INTO games (id, home_team, away_team, created_at, organizer_secret_hash) VALUES (?, ?, ?, ?, ?)').bind(gameId, homeTeam, awayTeam, createdAt, await hashSecret(organizerSecret)).run();
+  await env.DB.prepare('INSERT INTO games (id, home_team, away_team, created_at, organizer_secret_hash, status, team_id) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .bind(gameId, homeTeam, awayTeam, createdAt, await hashSecret(organizerSecret), 'scheduled', teamId).run();
   const game = await env.GAME_STATE.getByName(gameId).create(gameId);
-  return json({ game: { ...game, homeTeam, awayTeam, createdAt }, organizerSecret }, 201);
+  return json({ game: { ...game, homeTeam, awayTeam, createdAt, status: 'scheduled' }, organizerSecret }, 201);
 }
 
-async function teamGamesRoute(request: Request, env: Env, teamName: string) {
-  const decodedTeam = decodeURIComponent(teamName);
-  const records = await env.DB.prepare('SELECT id, home_team, away_team, status, created_at, started_at, ended_at FROM games WHERE home_team = ? OR away_team = ? ORDER BY created_at DESC LIMIT 50').bind(decodedTeam, decodedTeam).all<{ id: string; home_team: string; away_team: string; status: string; created_at: string; started_at: string | null; ended_at: string | null }>();
+async function teamGamesRoute(request: Request, env: Env, teamId: string) {
+  const userId = await authMiddleware(request, env);
+  if (!userId) return error('unauthorized', 401);
+  const membership = await env.DB.prepare("SELECT role FROM team_members WHERE team_id = ? AND user_id = ?").bind(teamId, userId).first<{ role: string }>();
+  if (!membership) return error('unauthorized', 403);
+
+  const records = await env.DB.prepare('SELECT id, home_team, away_team, status, created_at, started_at, ended_at FROM games WHERE team_id = ? ORDER BY created_at DESC LIMIT 50').bind(teamId).all<{ id: string; home_team: string; away_team: string; status: string; created_at: string; started_at: string | null; ended_at: string | null }>();
   return json({
-    team: decodedTeam,
+    team: teamId,
     games: records.results.map(r => ({
       gameId: r.id,
       homeTeam: r.home_team,
