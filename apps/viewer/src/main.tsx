@@ -1066,14 +1066,14 @@ function App() {
     {activeTab === 'timeline' && (
       <section className="tab-content timeline">
         <div className="timeline-head"><h2>Game events</h2><span>{saved.size} saved</span></div>
-        {(postgameEvents ?? game?.events)?.length ? (postgameEvents ?? game!.events).map((event) => <button className="event" key={event.id} onClick={() => playReplay(event)}><span className="event-icon">{event.kind === 'GOAL' ? '⚽' : event.kind === 'HIGHLIGHT' ? '★' : event.kind === 'GOAL_CORRECTION' ? '−' : '•'}</span><span><b>{event.kind === 'GOAL_CORRECTION' ? 'GOAL CORRECTED' : event.kind}{event.team ? ` · ${event.team === 'home' ? game?.homeTeam : game?.awayTeam}` : ''}</b><small>{formatClock(event.gameTimeSeconds)}</small></span><span>›</span></button>) : <p className="muted">No events yet. Goals, saves, and highlights will appear here.</p>}
+        {(postgameEvents ?? game?.events)?.length ? (postgameEvents ?? game!.events).map((event) => <TimelineEventItem key={event.id} event={event} game={game} gameId={canonicalGameId || gameId} onPlay={() => playReplay(event)} />) : <p className="muted">No events yet. Goals, saves, and highlights will appear here.</p>}
       </section>
     )}
 
     {activeTab === 'moments' && !isPublisher && (
       <section className="tab-content timeline">
         <div className="timeline-head"><h2>My saved moments</h2><span>{savedMoments.length} saved</span></div>
-        {savedMoments.length ? savedMoments.map((moment) => <button className="event" key={moment.id} onClick={() => playReplay({ id: moment.id, sequence: 0, kind: 'HIGHLIGHT', gameTimeSeconds: moment.game_time_seconds, createdAt: new Date(moment.media_at_ms).toISOString() })}><span className="event-icon">☆</span><span><b>Saved moment</b><small>Game clock {formatClock(moment.game_time_seconds)} · {moment.media_ready ? 'VIDEO READY' : 'VIDEO NOT AVAILABLE YET'}</small></span><span>›</span></button>) : <p className="muted">No moments saved yet. Click the ☆ SAVE MOMENT button during the game.</p>}
+        {savedMoments.length ? savedMoments.map((moment) => <TimelineEventItem key={moment.id} event={{ id: moment.id, sequence: 0, kind: 'HIGHLIGHT', gameTimeSeconds: moment.game_time_seconds, createdAt: new Date(moment.media_at_ms).toISOString() }} game={game} gameId={canonicalGameId || gameId} onPlay={() => playReplay({ id: moment.id, sequence: 0, kind: 'HIGHLIGHT', gameTimeSeconds: moment.game_time_seconds, createdAt: new Date(moment.media_at_ms).toISOString() })} isMoment={true} momentReady={moment.media_ready} />) : <p className="muted">No moments saved yet. Click the ☆ SAVE MOMENT button during the game.</p>}
         <p className="muted" style={{ marginTop: '24px' }}>Saved times stay with this browser. Archived video can play after the game ends.</p>
       </section>
     )}
@@ -1194,3 +1194,152 @@ function HlsPlayer({ gameId }: { gameId: string }) {
 // double-mount leaves an in-flight SUBSCRIBE behind on some browser builds,
 // causing duplicate reconnect loops, so mount the transport owner once.
 createRoot(document.getElementById('root')!).render(<App />);
+export async function performDownload(gameId: string, event: EventItem, game?: Game) {
+  if (!('VideoDecoder' in window)) throw new Error('This browser cannot process video downloads.');
+  const eventMs = event.createdAt ? Date.parse(event.createdAt) : Number.NaN;
+  if (!Number.isFinite(eventMs)) throw new Error('This moment has no media timestamp.');
+  const startMs = eventMs - 30_000;
+  const endMs = eventMs + 30_000;
+  const response = await fetch(`${API}/v1/games/${gameId}/media-segments?from=${startMs}&to=${endMs}`);
+  if (!response.ok) throw new Error('Archived video could not be loaded.');
+  const { segments } = await response.json() as { segments: ArchiveSegment[] };
+  if (!segments.length) throw new Error('Video for this moment is still processing or was not archived. Try again shortly.');
+  const frames = (await Promise.all(segments.map(async (segment) => {
+    const file = await fetch(`${API}${segment.url}`);
+    if (!file.ok) throw new Error('An archived video segment is unavailable.');
+    return unpackArchiveSegment(new Uint8Array(await file.arrayBuffer()), segment.startMs);
+  }))).flat();
+  
+  let lastUs = -1;
+  frames.sort((a, b) => a.receivedAtMs - b.receivedAtMs);
+  for (const frame of frames) {
+    frame.timestampUs = Math.max(lastUs + 1, Math.round(frame.receivedAtMs * 1000));
+    lastUs = frame.timestampUs;
+  }
+  
+  const eventFrame = frames.reduce<(typeof frames)[number] | undefined>((closest, frame) => !closest || Math.abs(frame.receivedAtMs - eventMs) < Math.abs(closest.receivedAtMs - eventMs) ? frame : closest, undefined);
+  if (!eventFrame || Math.abs(eventFrame.receivedAtMs - eventMs) > 15_000) throw new Error('Archived video does not cover this moment (clock drift may be too high).');
+  let firstKeyframe = -1;
+  for (let index = 0; index < frames.length; index += 1) {
+    if (frames[index].keyframe && frames[index].receivedAtMs <= startMs) firstKeyframe = index;
+  }
+  if (firstKeyframe < 0) firstKeyframe = frames.findIndex((frame) => frame.keyframe && frame.receivedAtMs <= eventMs + 5_000);
+  if (firstKeyframe < 0) throw new Error('Archived video has no keyframe before this moment.');
+  
+  const playbackStart = eventFrame.receivedAtMs - 12_000;
+  const playbackEnd = eventFrame.receivedAtMs + 8_000;
+  
+  let bestKeyframe = firstKeyframe;
+  for (let index = firstKeyframe; index < frames.length; index++) {
+    if (frames[index].keyframe && frames[index].receivedAtMs <= playbackStart) bestKeyframe = index;
+  }
+  const playableFrames = frames.slice(bestKeyframe).filter((frame) => frame.receivedAtMs <= playbackEnd);
+  if (!playableFrames.length) throw new Error('Archived video is not ready yet.');
+
+  const firstAudio = playableFrames.find(f => f.type === 'audio');
+  const firstVideo = playableFrames.find(f => f.type === 'video');
+  const muxer = new Muxer({
+    target: new ArrayBufferTarget(),
+    video: { codec: 'avc', width: 1280, height: 720 },
+    audio: firstAudio && firstAudio.sampleRate && firstAudio.channels ? {
+      codec: 'aac', sampleRate: firstAudio.sampleRate, numberOfChannels: firstAudio.channels,
+    } : undefined,
+    firstTimestampBehavior: 'offset',
+    fastStart: 'in-memory',
+  });
+
+  const canvas = new OffscreenCanvas(1280, 720);
+  const ctx = canvas.getContext('2d')!;
+  
+  let encodeError: Error | undefined;
+  const encoder = new VideoEncoder({
+    output: (chunk, metadata) => {
+      if (metadata?.decoderConfig) muxer.addVideoChunk(chunk, metadata);
+      else muxer.addVideoChunk(chunk);
+    },
+    error: (e) => { encodeError = e; }
+  });
+  encoder.configure({ codec: 'avc1.42E01E', width: 1280, height: 720, bitrate: 2_500_000, framerate: 30, hardwareAcceleration: 'prefer-hardware' });
+
+  let decodeResolve!: () => void;
+  let decodePromise = new Promise<void>((r) => { decodeResolve = r; });
+  let pendingFrames = 0;
+  let decodedCount = 0;
+  
+  const decoder = new VideoDecoder({
+    output: async (frame) => {
+      pendingFrames++;
+      ctx.clearRect(0, 0, 1280, 720);
+      ctx.drawImage(frame, 0, 0, 1280, 720);
+      
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
+      ctx.fillRect(40, 40, 480, 60);
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 28px sans-serif';
+      ctx.fillText(`${game?.homeTeam ?? 'Home'} vs ${game?.awayTeam ?? 'Away'}`, 60, 80);
+      
+      const newFrame = new VideoFrame(canvas, { timestamp: frame.timestamp });
+      while (encoder.encodeQueueSize > 5) await new Promise(r => setTimeout(r, 10)); // Backpressure
+      encoder.encode(newFrame, { keyFrame: decodedCount % 60 === 0 });
+      decodedCount++;
+      newFrame.close();
+      frame.close();
+      pendingFrames--;
+    },
+    error: (e) => { encodeError = e; decodeResolve(); }
+  });
+  const originalCodec = firstVideo ? h264Codec(firstVideo.payload) : undefined;
+  decoder.configure({ codec: originalCodec || 'avc1.42E01E' });
+
+  for (const frame of playableFrames) {
+    if (frame.type === 'video') decoder.decode(new EncodedVideoChunk({ type: frame.keyframe ? 'key' : 'delta', timestamp: frame.timestampUs, data: frame.payload }));
+    else if (frame.type === 'audio') muxer.addAudioChunk(new EncodedAudioChunk({ type: 'key', timestamp: frame.timestampUs, data: frame.payload }));
+  }
+  
+  await decoder.flush();
+  while (pendingFrames > 0 && !encodeError) await new Promise(r => setTimeout(r, 10));
+  decodeResolve();
+  await decodePromise;
+  await encoder.flush();
+  if (encodeError) throw encodeError;
+  
+  muxer.finalize();
+  const blob = new Blob([muxer.target.buffer], { type: 'video/mp4' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = `clip-${event.id}.mp4`;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+}
+
+function TimelineEventItem({ event, gameId, game, onPlay, isMoment = false, momentReady = false }: { event: EventItem, gameId: string, game?: Game, onPlay: () => void, isMoment?: boolean, momentReady?: boolean | number }) {
+  const [downloading, setDownloading] = useState(false);
+  const handleDownload = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setDownloading(true);
+    try {
+      await performDownload(gameId, event, game);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  return (
+    <div className="event" onClick={onPlay}>
+      <span className="event-icon">{isMoment ? '☆' : event.kind === 'GOAL' ? '⚽' : event.kind === 'HIGHLIGHT' ? '★' : event.kind === 'GOAL_CORRECTION' ? '−' : '•'}</span>
+      <span>
+        <b>{isMoment ? 'Saved moment' : event.kind === 'GOAL_CORRECTION' ? 'GOAL CORRECTED' : event.kind}{!isMoment && event.team ? ` · ${event.team === 'home' ? game?.homeTeam : game?.awayTeam}` : ''}</b>
+        <small>{isMoment ? `Game clock ${formatClock(event.gameTimeSeconds)} · ${momentReady ? 'VIDEO READY' : 'VIDEO NOT AVAILABLE YET'}` : formatClock(event.gameTimeSeconds)}</small>
+      </span>
+      <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+        {game?.status === 'ended' && (isMoment ? momentReady : true) && (
+          <button className="download-btn" onClick={handleDownload} disabled={downloading} title="Download MP4" style={{ background: 'rgba(255,255,255,0.1)', border: 'none', borderRadius: '8px', padding: '8px 12px', cursor: 'pointer', color: 'white', fontWeight: 'bold' }}>
+            {downloading ? '⬇️...' : '⬇️'}
+          </button>
+        )}
+        <span style={{ padding: '0 8px' }}>›</span>
+      </div>
+    </div>
+  );
+}
