@@ -225,7 +225,7 @@ function Draft16Camera({ relayUrl, broadcastName, capabilityIdentity, onRewindRe
             replayQueueRef.current = [];
             replayBaseRef.current = undefined;
             replayTelemetryRef.current = { count: 0 };
-            if (replayTimerRef.current) window.clearTimeout(replayTimerRef.current);
+            if (replayTimerRef.current) { window.clearTimeout(replayTimerRef.current); replayTimerRef.current = undefined; }
             historicalActiveRef.current = true;
             console.info('[bleachers:rewind-first-historical]', { location: { groupId: String(start.groupId), objectId: String(start.objectId) }, keyframe: true, decode: 'keyframe-available', firstAgeUs: latest.timestampUs - start.timestampUs });
             for (const frame of frames.slice(startIndex)) {
@@ -260,7 +260,7 @@ function Draft16Camera({ relayUrl, broadcastName, capabilityIdentity, onRewindRe
       window.clearInterval(healthTimer);
       closeActive?.();
       historicalCloseRef.current?.();
-      if (replayTimerRef.current) window.clearTimeout(replayTimerRef.current);
+      if (replayTimerRef.current) { window.clearTimeout(replayTimerRef.current); replayTimerRef.current = undefined; }
       closeDecoder(decoderRef);
       closeDecoder(replayDecoderRef);
       closeAudioDecoder(audioDecoderRef);
@@ -269,8 +269,69 @@ function Draft16Camera({ relayUrl, broadcastName, capabilityIdentity, onRewindRe
       if (previousUrl.current) URL.revokeObjectURL(previousUrl.current);
     };
   }, [relayUrl, broadcastName, onRewindReady, onReplayState]);
-  useEffect(() => { if (!replayActive) { historicalCloseRef.current?.(); historicalCloseRef.current = undefined; historicalActiveRef.current = false; closeDecoder(replayDecoderRef); replayQueueRef.current = []; replayBaseRef.current = undefined; replayTelemetryRef.current = { count: 0 }; if (replayTimerRef.current) window.clearTimeout(replayTimerRef.current); } }, [replayActive]);
-  return <div className="camera-stage"><span className={`media-health media-health-${mediaState}`}><span className="media-health-dot" />{mediaState === 'live' ? 'LIVE' : mediaState === 'degraded' ? 'VIDEO DELAYED' : mediaState === 'reconnecting' ? 'RECONNECTING' : mediaState === 'waiting' ? 'WAITING FOR CAMERA' : 'CONNECTING'}</span>{imageUrl ? <img src={imageUrl} alt="Live camera" /> : <><canvas ref={canvasRef} style={{ display: !replayActive && mediaError.startsWith('LIVE H.264') ? 'block' : 'none', width: '100%', height: '100%', objectFit: 'contain' }} /><canvas ref={replayCanvasRef} style={{ display: replayActive ? 'block' : 'none', width: '100%', height: '100%', objectFit: 'contain' }} />{(!mediaError.startsWith('LIVE H.264') && !replayActive) ? <div className="video-placeholder"><div className="play-orb">▶</div><p>{mediaError || 'Connecting to draft-16 camera…'}</p></div> : null}</>}</div>;
+  useEffect(() => { if (!replayActive) { historicalCloseRef.current?.(); historicalCloseRef.current = undefined; historicalActiveRef.current = false; closeDecoder(replayDecoderRef); replayQueueRef.current = []; replayBaseRef.current = undefined; replayTelemetryRef.current = { count: 0 }; if (replayTimerRef.current) { window.clearTimeout(replayTimerRef.current); replayTimerRef.current = undefined; } } }, [replayActive]);
+  const handleScrubberChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const percent = parseFloat(e.target.value);
+    if (percent === 100 && replayActive) {
+      onReplayState(false);
+      return;
+    }
+    const frames = framesRef.current;
+    if (frames.length < 2) return;
+    const startUs = frames[0].timestampUs;
+    const endUs = frames.at(-1)!.timestampUs;
+    const targetUs = startUs + (endUs - startUs) * (percent / 100);
+    
+    let startIndex = frames.findIndex((frame) => frame.keyframe);
+    for (let index = frames.length - 1; index >= 0; index -= 1) {
+      if (frames[index].keyframe && frames[index].timestampUs <= targetUs) { startIndex = index; break; }
+    }
+    if (startIndex < 0) return;
+    
+    closeDecoder(replayDecoderRef);
+    replayQueueRef.current = [];
+    replayBaseRef.current = undefined;
+    replayTelemetryRef.current = { count: 0 };
+    if (replayTimerRef.current) { window.clearTimeout(replayTimerRef.current); replayTimerRef.current = undefined; }
+    historicalActiveRef.current = true;
+    for (const frame of frames.slice(startIndex)) {
+      enqueueReplayFrame(frame, replayDecoderRef, replayQueueRef, replayBaseRef, replayTimerRef, replayCanvasRef, replayTelemetryRef, onReplayState);
+    }
+  };
+
+  const jumpToLive = () => onReplayState(false);
+
+  return (
+    <div className="camera-stage">
+      <span className={`media-health media-health-${mediaState}`}>
+        <span className="media-health-dot" />
+        {mediaState === 'live' ? 'LIVE' : mediaState === 'degraded' ? 'VIDEO DELAYED' : mediaState === 'reconnecting' ? 'RECONNECTING' : mediaState === 'waiting' ? 'WAITING FOR CAMERA' : 'CONNECTING'}
+      </span>
+      {imageUrl ? <img src={imageUrl} alt="Live camera" /> : <>
+        <canvas ref={canvasRef} style={{ display: !replayActive && mediaError.startsWith('LIVE H.264') ? 'block' : 'none', width: '100%', height: '100%', objectFit: 'contain' }} />
+        <canvas ref={replayCanvasRef} style={{ display: replayActive ? 'block' : 'none', width: '100%', height: '100%', objectFit: 'contain' }} />
+        {(!mediaError.startsWith('LIVE H.264') && !replayActive) ? <div className="video-placeholder"><div className="play-orb">▶</div><p>{mediaError || 'Connecting to draft-16 camera…'}</p></div> : null}
+      </>}
+      {mediaState === 'live' && (
+        <div className="dvr-controls" style={{ position: 'absolute', bottom: 80, left: 16, right: 16, display: 'flex', gap: 12, alignItems: 'center', background: 'rgba(0,0,0,0.6)', padding: '8px 16px', borderRadius: 8, zIndex: 4, backdropFilter: 'blur(12px)' }}>
+          <input 
+            type="range" 
+            min="0" max="100" 
+            value={replayActive ? undefined : 100}
+            defaultValue={replayActive ? undefined : 100}
+            onChange={handleScrubberChange}
+            style={{ flex: 1, cursor: 'pointer' }}
+            title="DVR Timeline"
+          />
+          {replayActive && (
+            <button onClick={jumpToLive} style={{ background: '#FF5D6E', color: 'white', border: 'none', padding: '4px 10px', borderRadius: 4, cursor: 'pointer', fontSize: 12, fontWeight: 'bold' }}>
+              JUMP TO LIVE
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function closeDecoder(ref: { current: VideoDecoder | undefined }) {
@@ -304,7 +365,22 @@ function playAudioData(context: AudioContext, audio: AudioData, nextTimeRef: { c
     const source = context.createBufferSource();
     source.buffer = buffer;
     source.connect(context.destination);
-    const startAt = Math.max(context.currentTime + 0.03, nextTimeRef.current);
+    const targetLatency = 0.05; // 50ms buffer
+    const maxLatency = 0.25; // 250ms max buffer before dropping delay
+    
+    // If our scheduled time has fallen too far behind, jump it forward
+    if (nextTimeRef.current < context.currentTime) {
+      nextTimeRef.current = context.currentTime + targetLatency;
+    }
+    
+    // If our scheduled time has grown too far ahead (accumulated latency drift)
+    // we drop the delay to catch back up to the target latency.
+    if (nextTimeRef.current > context.currentTime + maxLatency) {
+      console.info('[bleachers:audio-jitter]', { drift: nextTimeRef.current - context.currentTime, action: 'dropping delay' });
+      nextTimeRef.current = context.currentTime + targetLatency;
+    }
+    
+    const startAt = nextTimeRef.current;
     source.start(startAt);
     nextTimeRef.current = startAt + buffer.duration;
   } finally { audio.close(); }
@@ -421,14 +497,17 @@ function ArchivedReplay({ gameId, game, event, onClose }: { gameId: string; game
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
   const [finished, setFinished] = useState(false);
-  const [retry, setRetry] = useState(0);
+  const [fetchRetry, setFetchRetry] = useState(0);
+  const [playCount, setPlayCount] = useState(0);
   const [playableFrames, setPlayableFrames] = useState<any[]>([]);
+  const [downloading, setDownloading] = useState(false);
 
   const downloadClip = async () => {
     if (!playableFrames.length) return;
-    setLoading(true);
+    setDownloading(true);
     try {
       const firstAudio = playableFrames.find(f => f.type === 'audio');
+      const firstVideo = playableFrames.find(f => f.type === 'video');
       const muxer = new Muxer({
         target: new ArrayBufferTarget(),
         video: { codec: 'avc', width: 1280, height: 720 },
@@ -452,11 +531,10 @@ function ArchivedReplay({ gameId, game, event, onClose }: { gameId: string; game
       });
       encoder.configure({ codec: 'avc1.42E01E', width: 1280, height: 720, bitrate: 2_500_000, framerate: 30, hardwareAcceleration: 'prefer-hardware' });
 
-      let decodeResolve: () => void;
+      let decodeResolve!: () => void;
       let decodePromise = new Promise<void>((r) => { decodeResolve = r; });
       let pendingFrames = 0;
       let decodedCount = 0;
-      const videoFrames = playableFrames.filter(f => f.type === 'video');
       
       const decoder = new VideoDecoder({
         output: async (frame) => {
@@ -473,13 +551,15 @@ function ArchivedReplay({ gameId, game, event, onClose }: { gameId: string; game
           const newFrame = new VideoFrame(canvas, { timestamp: frame.timestamp });
           while (encoder.encodeQueueSize > 5) await new Promise(r => setTimeout(r, 10)); // Backpressure
           encoder.encode(newFrame, { keyFrame: decodedCount % 60 === 0 });
+          decodedCount++;
           newFrame.close();
           frame.close();
           pendingFrames--;
         },
         error: (e) => { encodeError = e; decodeResolve(); }
       });
-      decoder.configure({ codec: 'avc1.42E01E' });
+      const originalCodec = firstVideo ? h264Codec(firstVideo.payload) : undefined;
+      decoder.configure({ codec: originalCodec || 'avc1.42E01E' });
 
       for (const frame of playableFrames) {
         if (frame.type === 'video') decoder.decode(new EncodedVideoChunk({ type: frame.keyframe ? 'key' : 'delta', timestamp: frame.timestampUs, data: frame.payload }));
@@ -508,23 +588,14 @@ function ArchivedReplay({ gameId, game, event, onClose }: { gameId: string; game
       console.error(cause);
       setError('Failed to process download overlay.');
     } finally {
-      setLoading(false);
+      setDownloading(false);
     }
   };
 
   useEffect(() => {
     const abort = new AbortController();
-    const run = async () => {
+    const runFetch = async () => {
       setLoading(true); setError(''); setFinished(false);
-      closeDecoder(decoderRef);
-      closeAudioDecoder(audioDecoderRef);
-      audioContextRef.current?.close().catch(() => undefined);
-      audioContextRef.current = undefined;
-      audioNextTimeRef.current = 0;
-      queueRef.current = [];
-      baseRef.current = undefined;
-      timerRef.current = undefined;
-      telemetryRef.current = { count: 0 };
       try {
         if (!('VideoDecoder' in window)) throw new Error('This browser cannot play archived H.264 video.');
         const eventMs = event.createdAt ? Date.parse(event.createdAt) : Number.NaN;
@@ -543,7 +614,7 @@ function ArchivedReplay({ gameId, game, event, onClose }: { gameId: string; game
         if (abort.signal.aborted) return;
         
         let lastUs = -1;
-        frames.sort((a, b) => a.receivedAtMs - b.receivedAtMs); // Ensure chronological order even if segments arrived out of order
+        frames.sort((a, b) => a.receivedAtMs - b.receivedAtMs);
         for (const frame of frames) {
           frame.timestampUs = Math.max(lastUs + 1, Math.round(frame.receivedAtMs * 1000));
           lastUs = frame.timestampUs;
@@ -557,7 +628,7 @@ function ArchivedReplay({ gameId, game, event, onClose }: { gameId: string; game
         }
         if (firstKeyframe < 0) firstKeyframe = frames.findIndex((frame) => frame.keyframe && frame.receivedAtMs <= eventMs + 5_000);
         if (firstKeyframe < 0) throw new Error('Archived video has no keyframe before this moment.');
-        // Playable frames are clamped to a 20-second window centered around the event
+        
         const playbackStart = eventFrame.receivedAtMs - 12_000;
         const playbackEnd = eventFrame.receivedAtMs + 8_000;
         
@@ -569,34 +640,61 @@ function ArchivedReplay({ gameId, game, event, onClose }: { gameId: string; game
         if (!playable.length) throw new Error('Archived video is not ready yet.');
         setPlayableFrames(playable);
         setLoading(false);
-        for (const frame of playable) {
-          if (frame.type === 'video') {
-            enqueueReplayFrame(frame, decoderRef, queueRef, baseRef, timerRef, canvasRef, telemetryRef, (active) => { if (!active) setFinished(true); });
-          } else if (frame.type === 'audio' && frame.sampleRate && frame.channels && frame.config) {
-            if (!audioContextRef.current) {
-               audioContextRef.current = new AudioContext();
-               audioDecoderRef.current = new AudioDecoder({
-                 output: (audio) => playAudioData(audioContextRef.current!, audio, audioNextTimeRef, audioMutedRef),
-                 error: (e) => console.info('[bleachers:archived-aac-error]', { error: e.message })
-               });
-               audioDecoderRef.current.configure({ codec: 'mp4a.40.2', sampleRate: frame.sampleRate, numberOfChannels: frame.channels, description: frame.config });
-            }
-            if (audioDecoderRef.current?.state === 'configured') {
-              try { audioDecoderRef.current.decode(new EncodedAudioChunk({ type: 'key', timestamp: frame.timestampUs, data: frame.payload })); }
-              catch (e) { console.info('[bleachers:archived-aac-drop]', { error: String(e) }); }
-            }
-          }
-        }
       } catch (cause) {
         if (!abort.signal.aborted) { setLoading(false); setError(cause instanceof Error ? cause.message : 'Archived video could not be played.'); }
       }
     };
-    void run();
-    return () => { abort.abort(); if (timerRef.current !== undefined) window.clearTimeout(timerRef.current); timerRef.current = undefined; closeDecoder(decoderRef); closeAudioDecoder(audioDecoderRef); audioContextRef.current?.close().catch(()=>undefined); queueRef.current = []; baseRef.current = undefined; };
-  }, [gameId, event, retry]);
-  return <div className="archived-replay"><canvas ref={canvasRef} />{loading ? <p role="status">Loading saved video…</p> : null}{error ? <div className="archive-error" role="status"><p>{error}</p><button onClick={() => setRetry((value) => value + 1)}>TRY AGAIN</button></div> : null}{finished ? <div className="archive-finished" role="status">Replay finished <button onClick={() => setRetry((value) => value + 1)}>PLAY AGAIN</button></div> : null}
+    void runFetch();
+    return () => { abort.abort(); };
+  }, [gameId, event, fetchRetry]);
+
+  useEffect(() => {
+    if (!playableFrames.length) return;
+    setFinished(false);
+    closeDecoder(decoderRef);
+    closeAudioDecoder(audioDecoderRef);
+    audioContextRef.current?.close().catch(() => undefined);
+    audioContextRef.current = undefined;
+    audioNextTimeRef.current = 0;
+    queueRef.current = [];
+    baseRef.current = undefined;
+    if (timerRef.current !== undefined) { window.clearTimeout(timerRef.current); timerRef.current = undefined; }
+    timerRef.current = undefined;
+    telemetryRef.current = { count: 0 };
+
+    for (const frame of playableFrames) {
+      if (frame.type === 'video') {
+        enqueueReplayFrame(frame, decoderRef, queueRef, baseRef, timerRef, canvasRef, telemetryRef, (active) => { if (!active) setFinished(true); });
+      } else if (frame.type === 'audio' && frame.sampleRate && frame.channels && frame.config) {
+        if (!audioContextRef.current) {
+           audioContextRef.current = new AudioContext();
+           audioDecoderRef.current = new AudioDecoder({
+             output: (audio) => playAudioData(audioContextRef.current!, audio, audioNextTimeRef, audioMutedRef),
+             error: (e) => console.info('[bleachers:archived-aac-error]', { error: e.message })
+           });
+           audioDecoderRef.current.configure({ codec: 'mp4a.40.2', sampleRate: frame.sampleRate, numberOfChannels: frame.channels, description: frame.config });
+        }
+        if (audioDecoderRef.current?.state === 'configured') {
+          try { audioDecoderRef.current.decode(new EncodedAudioChunk({ type: 'key', timestamp: frame.timestampUs, data: frame.payload })); }
+          catch (e) { console.info('[bleachers:archived-aac-drop]', { error: String(e) }); }
+        }
+      }
+    }
+
+    return () => {
+      if (timerRef.current !== undefined) { window.clearTimeout(timerRef.current); timerRef.current = undefined; }
+      timerRef.current = undefined;
+      closeDecoder(decoderRef);
+      closeAudioDecoder(audioDecoderRef);
+      audioContextRef.current?.close().catch(()=>undefined);
+      queueRef.current = [];
+      baseRef.current = undefined;
+    };
+  }, [playableFrames, playCount]);
+
+  return <div className="archived-replay"><canvas ref={canvasRef} />{loading ? <p role="status">Loading saved video…</p> : null}{error ? <div className="archive-error" role="status"><p>{error}</p><button onClick={() => setFetchRetry((value) => value + 1)}>TRY AGAIN</button></div> : null}{finished ? <div className="archive-finished" role="status">Replay finished <button onClick={() => setPlayCount((value) => value + 1)}>PLAY AGAIN</button></div> : null}
     <div className="archive-controls">
-      {playableFrames.length > 0 && <button className="archive-download" onClick={downloadClip}>↓ DOWNLOAD MP4</button>}
+      {playableFrames.length > 0 && <button className="archive-download" onClick={downloadClip} disabled={downloading}>{downloading ? '↓ DOWNLOADING...' : '↓ DOWNLOAD MP4'}</button>}
       <button className="archive-close" onClick={onClose}>✕ CLOSE REPLAY</button>
     </div>
   </div>;
@@ -822,6 +920,7 @@ function App() {
   // Short codes are accepted by the API, but media namespaces use the
   // canonical UUID returned in the game record.
   const [broadcastName, setBroadcastName] = useState(params.get('name') ?? '');
+  const [activeTab, setActiveTab] = useState<'timeline' | 'moments' | 'organizer'>('timeline');
 
   useEffect(() => {
     if (!gameId) return;
@@ -941,17 +1040,50 @@ function App() {
     {error ? <section className="error">{error}</section> : null}
     {isPublisher ? <section className="replay-message">Browser publishing does not archive footage. Use the Android broadcaster for saved video and replay after reload.</section> : null}
     <section className={`stage ${fullScreenFallback ? 'stage-fallback-fullscreen' : ''}`} ref={stageRef}>
-      {game?.status === 'ended' ? <div className="video-placeholder"><div className="play-orb">✓</div><p>Game ended · timeline and saved moments remain available.</p></div> : relayUrl && broadcastName ? isPublisher ? <moq-publish-ui><moq-publish url={relayUrl} name={broadcastName} source="camera"><video muted autoPlay playsInline /></moq-publish></moq-publish-ui> : <Draft16Camera relayUrl={relayUrl} broadcastName={broadcastName} capabilityIdentity={capabilityIdentity} onRewindReady={registerRewind} replayActive={replayActive} onReplayState={handleReplayState} audioMuted={audioMuted} /> : <div className="video-placeholder"><div className="play-orb">▶</div><p>{isPublisher ? 'Requesting camera publishing capability…' : 'Requesting live viewing capability…'}</p></div>}
+      {game?.status === 'ended' ? <div className="video-placeholder"><div className="play-orb">✓</div><p>Game ended · timeline and saved moments remain available.</p></div> : 
+      relayUrl && broadcastName ? 
+        isPublisher ? <moq-publish-ui><moq-publish url={relayUrl} name={broadcastName} source="camera"><video muted autoPlay playsInline /></moq-publish></moq-publish-ui> : 
+        ('WebTransport' in window && 'VideoDecoder' in window) ? 
+          <Draft16Camera relayUrl={relayUrl} broadcastName={broadcastName} capabilityIdentity={capabilityIdentity} onRewindReady={registerRewind} replayActive={replayActive} onReplayState={handleReplayState} audioMuted={audioMuted} /> : 
+          <HlsPlayer gameId={canonicalGameId || gameId} /> : 
+      <div className="video-placeholder"><div className="play-orb">▶</div><p>{isPublisher ? 'Requesting camera publishing capability…' : 'Requesting live viewing capability…'}</p></div>}
       {archivedEvent ? <ArchivedReplay gameId={canonicalGameId || gameId} game={game} event={archivedEvent} onClose={() => { setArchivedEvent(undefined); setReplaying(undefined); }} /> : null}
       <div className="stage-overlay"><div className="stage-overlay-score"><b>{game?.homeTeam ?? 'HOME'} {game?.homeScore ?? '—'} · {game?.awayScore ?? '—'} {game?.awayTeam ?? 'AWAY'}</b><span>{clock}</span></div><div className="stage-overlay-actions">{saveStatus ? <span className="stage-save-status" role="status">{saveStatus}</span> : null}{!isPublisher ? <><button onClick={() => { setReplayActive(false); setArchivedEvent(undefined); setReplaying(undefined); setReplayMessage(''); }}>● LIVE</button><button disabled={saveDisabled} onClick={() => void saveMoment()}>☆ SAVE</button><button onClick={() => setAudioMuted((muted) => !muted)}>{audioMuted ? '🔇' : '🔊'}</button></> : null}<button onClick={() => void toggleFullScreen()} aria-label={fullScreen ? 'Exit fullscreen video' : 'Fullscreen video'}>{fullScreen ? '↙ EXIT' : '⛶ FULLSCREEN'}</button></div></div>
     </section>
-    <section className="scoreboard"><div><span>{game?.homeTeam ?? 'HOME'}</span><strong>{game?.homeScore ?? '—'}</strong></div><div className="clock"><small>1ST HALF</small><strong>{clock}</strong></div><div><span>{game?.awayTeam ?? 'AWAY'}</span><strong>{game?.awayScore ?? '—'}</strong></div></section>
-    {isOrganizer && game ? organizerSecret ? <OrganizerControls game={game} gameId={canonicalGameId || gameId} secret={organizerSecret} onChange={setGame} /> : <section className="error">Organizer link is missing its secret.</section> : null}
+    
+    <section className="scoreboard"><div><span>{game?.homeTeam ?? 'HOME'}</span><strong key={game?.homeScore} className="score-anim">{game?.homeScore ?? '—'}</strong></div><div className="clock"><small>1ST HALF</small><strong>{clock}</strong></div><div><span>{game?.awayTeam ?? 'AWAY'}</span><strong key={game?.awayScore} className="score-anim">{game?.awayScore ?? '—'}</strong></div></section>
+    
     {!isPublisher ? <section className="actions"><button className="live-button" onClick={() => { setReplaying(undefined); setReplayActive(false); setArchivedEvent(undefined); setReplayMessage(''); window.scrollTo({ top: 0, behavior: 'smooth' }); }}>● LIVE</button><button onClick={() => playReplay()}>↶ −10 SEC</button><button disabled={saveDisabled} onClick={() => void saveMoment()}>☆ SAVE MOMENT</button><button className={audioMuted ? 'muted-button' : ''} onClick={() => setAudioMuted((muted) => !muted)}>{audioMuted ? '🔇 UNMUTE' : '🔊 MUTE'}</button></section> : null}
     {replayMessage ? <p className="replay-message" role="status">{replayMessage}</p> : null}
     {replaying ? <section className="replay-card"><div><span className="tag">REPLAY</span><h2>{replaying.kind} · {formatClock(replaying.gameTimeSeconds)}</h2><p>{archivedEvent ? 'Playing archived video.' : 'Replay is selected while the live subscription stays active.'}</p></div><button onClick={() => { setReplayActive(false); setArchivedEvent(undefined); setReplaying(undefined); setReplayMessage(''); }}>RETURN TO LIVE</button></section> : null}
-    <section className="timeline"><div className="timeline-head"><h2>Game events</h2><span>{saved.size} saved</span></div>{(postgameEvents ?? game?.events)?.length ? (postgameEvents ?? game!.events).map((event) => <button className="event" key={event.id} onClick={() => playReplay(event)}><span className="event-icon">{event.kind === 'GOAL' ? '⚽' : event.kind === 'HIGHLIGHT' ? '★' : event.kind === 'GOAL_CORRECTION' ? '−' : '•'}</span><span><b>{event.kind === 'GOAL_CORRECTION' ? 'GOAL CORRECTED' : event.kind}{event.team ? ` · ${event.team === 'home' ? game?.homeTeam : game?.awayTeam}` : ''}</b><small>{formatClock(event.gameTimeSeconds)}</small></span><span>›</span></button>) : <p className="muted">No events yet. Goals, saves, and highlights will appear here.</p>}</section>
-    {!isPublisher && savedMoments.length ? <section className="timeline"><div className="timeline-head"><h2>My saved moments</h2><span>{savedMoments.length}</span></div>{savedMoments.map((moment) => <button className="event" key={moment.id} onClick={() => playReplay({ id: moment.id, sequence: 0, kind: 'HIGHLIGHT', gameTimeSeconds: moment.game_time_seconds, createdAt: new Date(moment.media_at_ms).toISOString() })}><span className="event-icon">☆</span><span><b>Saved moment</b><small>Game clock {formatClock(moment.game_time_seconds)} · {moment.media_ready ? 'VIDEO READY' : 'VIDEO NOT AVAILABLE YET'}</small></span><span>›</span></button>)}<p className="muted">Saved times stay with this browser. Archived video can play after the game ends.</p></section> : null}
+
+    <div className="tab-bar">
+      <button className={`tab ${activeTab === 'timeline' ? 'active' : ''}`} onClick={() => setActiveTab('timeline')}>Timeline</button>
+      {!isPublisher ? <button className={`tab ${activeTab === 'moments' ? 'active' : ''}`} onClick={() => setActiveTab('moments')}>My Moments {savedMoments.length ? `(${savedMoments.length})` : ''}</button> : null}
+      {isOrganizer ? <button className={`tab ${activeTab === 'organizer' ? 'active' : ''}`} onClick={() => setActiveTab('organizer')}>Organizer</button> : null}
+    </div>
+
+    {activeTab === 'timeline' && (
+      <section className="tab-content timeline">
+        <div className="timeline-head"><h2>Game events</h2><span>{saved.size} saved</span></div>
+        {(postgameEvents ?? game?.events)?.length ? (postgameEvents ?? game!.events).map((event) => <button className="event" key={event.id} onClick={() => playReplay(event)}><span className="event-icon">{event.kind === 'GOAL' ? '⚽' : event.kind === 'HIGHLIGHT' ? '★' : event.kind === 'GOAL_CORRECTION' ? '−' : '•'}</span><span><b>{event.kind === 'GOAL_CORRECTION' ? 'GOAL CORRECTED' : event.kind}{event.team ? ` · ${event.team === 'home' ? game?.homeTeam : game?.awayTeam}` : ''}</b><small>{formatClock(event.gameTimeSeconds)}</small></span><span>›</span></button>) : <p className="muted">No events yet. Goals, saves, and highlights will appear here.</p>}
+      </section>
+    )}
+
+    {activeTab === 'moments' && !isPublisher && (
+      <section className="tab-content timeline">
+        <div className="timeline-head"><h2>My saved moments</h2><span>{savedMoments.length} saved</span></div>
+        {savedMoments.length ? savedMoments.map((moment) => <button className="event" key={moment.id} onClick={() => playReplay({ id: moment.id, sequence: 0, kind: 'HIGHLIGHT', gameTimeSeconds: moment.game_time_seconds, createdAt: new Date(moment.media_at_ms).toISOString() })}><span className="event-icon">☆</span><span><b>Saved moment</b><small>Game clock {formatClock(moment.game_time_seconds)} · {moment.media_ready ? 'VIDEO READY' : 'VIDEO NOT AVAILABLE YET'}</small></span><span>›</span></button>) : <p className="muted">No moments saved yet. Click the ☆ SAVE MOMENT button during the game.</p>}
+        <p className="muted" style={{ marginTop: '24px' }}>Saved times stay with this browser. Archived video can play after the game ends.</p>
+      </section>
+    )}
+
+    {activeTab === 'organizer' && isOrganizer && game && (
+      <section className="tab-content">
+        {organizerSecret ? <OrganizerControls game={game} gameId={canonicalGameId || gameId} secret={organizerSecret} onChange={setGame} /> : <section className="error">Organizer link is missing its secret.</section>}
+      </section>
+    )}
+
   </main>;
 }
 
@@ -969,19 +1101,21 @@ function TeamProfile({ teamName }: { teamName: string }) {
   
   return <main className="shell">
     <header className="topbar"><div><span className="mark">BLEACHERS</span><span className="live-label">TEAM PROFILE</span></div><div className="topbar-actions"><button className="share-link" onClick={() => { navigator.clipboard.writeText(location.href); alert('Team link copied'); }}>SHARE</button></div></header>
-    <div className="empty" style={{ minHeight: 'auto', padding: '40px 0' }}>
-      <h1>{teamName}</h1>
-      <p className="muted">Game History & Upcoming Matchups</p>
+    
+    <div className="setup-card" style={{ padding: '60px 40px', marginBottom: '24px' }}>
+      <h1 style={{ fontSize: '56px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>{teamName}</h1>
+      <p className="muted" style={{ fontSize: '16px', letterSpacing: '0.1em', textTransform: 'uppercase', marginTop: '12px' }}>Game History & Matchups</p>
     </div>
+
     {error ? <section className="error">{error}</section> : null}
-    <section className="timeline">
+    <section className="tab-content timeline">
       <div className="timeline-head"><h2>All Games</h2><span>{games.length} total</span></div>
       {games.length ? games.map((g) => (
         <button className="event" onClick={() => window.location.href = `/?game=${g.gameId}`} key={g.gameId}>
           <span className="event-icon">{g.status === 'live' ? '🔴' : '🏟️'}</span>
           <span>
             <b>{g.homeTeam} vs {g.awayTeam}</b>
-            <small>{new Date(g.startedAt || g.createdAt).toLocaleDateString()} · {g.status.toUpperCase()}</small>
+            <small>{new Date(g.startedAt || g.createdAt).toLocaleDateString()} · <span style={{ color: g.status === 'live' ? 'var(--accent)' : 'inherit' }}>{g.status.toUpperCase()}</span></small>
           </span>
           <span>›</span>
         </button>
@@ -993,10 +1127,10 @@ function TeamProfile({ teamName }: { teamName: string }) {
 function LandingPage() {
   const [code, setCode] = useState('');
   return <main className="shell setup-shell">
-    <header className="topbar"><div><span className="mark">BLEACHERS</span><span className="live-label">LIVE SPORTS</span></div></header>
-    <section className="setup-card" style={{ marginTop: '2rem' }}>
-      <h1>Join a Game</h1>
-      <p className="muted">Enter a game code, UUID, or team name to connect directly.</p>
+    <header className="topbar" style={{ position: 'absolute', top: 24, left: 24, right: 24 }}><div><span className="mark">BLEACHERS</span><span className="live-label">LIVE SPORTS</span></div></header>
+    <section className="setup-card">
+      <h1 style={{ fontSize: '48px', marginBottom: '16px' }}>Join the Action</h1>
+      <p className="muted" style={{ fontSize: '15px', lineHeight: 1.5 }}>Enter a game code, UUID, or team name to connect directly to a live broadcast or postgame replay.</p>
       <form onSubmit={(e) => { 
         e.preventDefault(); 
         const cleaned = code.trim();
@@ -1011,14 +1145,49 @@ function LandingPage() {
         <label>Game Code or Team Name
           <input value={code} onChange={(e) => setCode(e.target.value)} placeholder="e.g. ABCDEF or 'Tigers'" required />
         </label>
-        <button className="live-button" type="submit">WATCH LIVE</button>
+        <button type="submit">WATCH LIVE</button>
       </form>
-      <div style={{ marginTop: '3rem', paddingTop: '2rem', borderTop: '1px solid rgba(255,255,255,0.1)' }}>
-        <p className="muted">Are you a team organizer?</p>
-        <button className="share-link" onClick={() => window.location.href = '/?mode=setup'} style={{ marginTop: '10px' }}>CREATE A NEW GAME</button>
+      <div style={{ marginTop: '40px', paddingTop: '32px', borderTop: '1px solid var(--glass-border)' }}>
+        <p className="muted" style={{ fontSize: '13px', textTransform: 'uppercase', letterSpacing: '0.1em', fontWeight: 800 }}>Organizer Area</p>
+        <button className="share-link" onClick={() => window.location.href = '/?mode=setup'} style={{ marginTop: '16px', background: 'rgba(255,255,255,0.05)', padding: '16px', width: '100%', borderRadius: '14px', border: '1px solid rgba(255,255,255,0.1)' }}>CREATE A NEW GAME</button>
       </div>
     </section>
   </main>;
+}
+
+function HlsPlayer({ gameId }: { gameId: string }) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    
+    // Check if browser natively supports HLS (like Safari)
+    if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      video.src = `${API}/v1/games/${gameId}/hls/playlist.m3u8`;
+      video.addEventListener('loadedmetadata', () => {
+        video.play().catch(e => console.error("HLS Playback failed", e));
+      });
+    }
+  }, [gameId]);
+
+  return (
+    <div className="camera-stage">
+      <span className="media-health media-health-degraded">
+        <span className="media-health-dot" /> NATIVE HLS FALLBACK
+      </span>
+      <video 
+        ref={videoRef}
+        controls
+        playsInline
+        autoPlay
+        muted // Needed for autoplay policy
+        style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+      >
+        Your browser does not support WebCodecs or Native HLS.
+      </video>
+    </div>
+  );
 }
 
 // MoQ owns long-lived WebTransport state.  React StrictMode's development

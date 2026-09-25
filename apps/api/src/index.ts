@@ -225,6 +225,8 @@ async function teamGamesRoute(request: Request, env: Env, teamName: string) {
   });
 }
 
+import { hlsPlaylistRoute, hlsSegmentRoute } from './hls';
+
 async function gameRoute(request: Request, env: Env, gameId: string, rest: string[]) {
   let row = await env.DB.prepare('SELECT id, home_team, away_team, status, created_at FROM games WHERE id = ?').bind(gameId).first<{ id: string; home_team: string; away_team: string; status: string; created_at: string }>();
   // The broadcaster displays a short game code. Accept it when it resolves to
@@ -236,6 +238,10 @@ async function gameRoute(request: Request, env: Env, gameId: string, rest: strin
   }
   if (!row) return error('game_not_found', 404);
   const resolvedGameId = row.id;
+  
+  if (request.method === 'GET' && rest[0] === 'hls' && rest[1] === 'playlist.m3u8') return hlsPlaylistRoute(request, env, resolvedGameId);
+  if (request.method === 'GET' && rest[0] === 'hls' && rest[1] === 'segment' && rest[2]) return hlsSegmentRoute(request, env, resolvedGameId, rest[2]);
+  
   const capabilityInput = rest[0] === 'media-capability' ? await body<{ role?: string }>(request.clone()) : null;
   const protectedAction = request.method === 'POST' && (['start', 'end', 'commands', 'media-segments', 'broadcast-simulcast'].includes(rest[0]) || rest[0] === 'media-capability' && capabilityInput?.role === 'publisher');
   if (protectedAction) {
@@ -245,7 +251,10 @@ async function gameRoute(request: Request, env: Env, gameId: string, rest: strin
   }
   const game = env.GAME_STATE.getByName(resolvedGameId);
   if (rest[0] === 'media-segments') return mediaSegmentRoute(request, env, resolvedGameId, rest);
-  if (request.method === 'GET' && rest.length === 0) return json({ game: { ...(await game.getSnapshot()), homeTeam: row.home_team, awayTeam: row.away_team, createdAt: row.created_at } });
+  if (request.method === 'GET' && rest.length === 0) {
+    const snapshot = await game.getSnapshot() as any;
+    return json({ game: { status: row.status, homeScore: 0, awayScore: 0, clockSeconds: 0, clockRunning: false, sequence: 0, events: [], ...snapshot, homeTeam: row.home_team, awayTeam: row.away_team, createdAt: row.created_at } });
+  }
   if (request.method === 'GET' && rest[0] === 'events') {
     const records = await env.DB.prepare('SELECT payload_json FROM game_events WHERE game_id = ? ORDER BY sequence DESC LIMIT 1000').bind(resolvedGameId).all<{ payload_json: string }>();
     return json({ events: records.results.map((record) => JSON.parse(record.payload_json) as GameEvent) });

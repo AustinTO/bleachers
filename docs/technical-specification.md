@@ -666,7 +666,7 @@ deletion.
 **Accept:** selected highlight remains playable after game; deletion revokes
 delivery and completes storage cleanup; no raw recording required by default.
 
-### Sprint 5 — Field hardening (3 weeks) **(In Progress)**
+### Sprint 5 — Field hardening (3 weeks) **(Completed)**
 
 Carrier matrices, thermal/battery, 90-minute games, phone call/app interruption,
 Wi-Fi↔cell handoff, adverse loss/throughput, live-first encoder recovery,
@@ -687,7 +687,7 @@ current API/permissions are verified; reuse adapter for YouTube later.
 without affecting primary stream; overlay correctness and destination failure
 isolation verified. This is explicitly non-blocking for pilot.
 
-### Sprint 7 — Pilot (4 weeks)
+### Sprint 7 — Pilot (4 weeks) **(In Progress)**
 
 Onboarding, consent/admin controls, instrumentation review, support runbook and
 5–10 invited teams across real matches.

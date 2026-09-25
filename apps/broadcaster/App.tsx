@@ -150,7 +150,7 @@ export default function App() {
       Alert.alert('MoQ relay connection failed', detail);
     } finally { setIsConnecting(false); }
   };
-  const endLive = async () => {
+  const stopLive = async () => {
     await BleachersCamera.stop().catch(() => undefined);
     liveRef.current = false;
     reconnectingRef.current = false;
@@ -160,10 +160,35 @@ export default function App() {
     archiveRef.current = undefined;
     moqSession.current?.close();
     moqSession.current = undefined;
-    if (gameId) await api.endGame(gameId).catch(() => undefined);
-    setIsClockRunning(false);
     setIsSaving(false);
   };
+
+  const confirmEndGame = () => {
+    Alert.alert('End Game', 'Are you sure you want to permanently end this game? Viewers will see it as completed.', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'End Game', style: 'destructive', onPress: async () => {
+          setIsSaving(true);
+          try {
+            await api.endGame(gameId!);
+            setGameId(undefined);
+            setIsClockRunning(false);
+          } catch (cause) {
+            Alert.alert('Failed to end game', cause instanceof Error ? cause.message : 'Unknown error');
+          } finally { setIsSaving(false); }
+      }}
+    ]);
+  };
+
+  const leaveGame = () => {
+    Alert.alert('Leave Game', 'Return to the setup screen? The game will remain active.', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Leave', onPress: () => {
+          setGameId(undefined);
+          setIsClockRunning(false);
+      }}
+    ]);
+  };
+
   const addEvent = async (kind: GameEventKind, team?: TeamSide) => {
     if (!gameId || isSaving) return;
     setIsSaving(true);
@@ -210,8 +235,18 @@ export default function App() {
                 <Pressable style={[styles.eventButton, styles.goalButton, isLive && styles.liveEventButton, { paddingVertical: 10, borderRadius: 10 }]} onPress={() => addGoal('away')}><Text style={[styles.eventButtonText, { fontSize: 17 }]}>GOAL</Text><Text style={styles.eventSubtext}>{awayTeam.toUpperCase()}</Text></Pressable>
               </View>
               <View style={styles.secondaryRow}><EventButton compact={isLive} label="SAVE" onPress={() => addEvent('SAVE')} /><EventButton compact={isLive} label="FOUL" onPress={() => addEvent('FOUL')} /><EventButton compact={isLive} label="HIGHLIGHT" onPress={() => addEvent('HIGHLIGHT')} /></View>
-              <Pressable disabled={isSaving || isConnecting} style={[styles.liveButton, isLive && styles.endButton, (isSaving || isConnecting) && styles.disabledButton, { paddingVertical: 10, borderRadius: 10 }]} onPress={() => isLive ? endLive() : startLive()}><View style={[styles.liveDot, isLive && styles.liveDotOn]} /><Text style={[styles.liveButtonText, { fontSize: 12 }]}>{isConnecting ? 'CONNECTING…' : isSaving ? 'UPDATING GAME…' : isLive ? 'END LIVE' : 'START LIVE'}</Text></Pressable>
+              <Pressable disabled={isSaving || isConnecting} style={[styles.liveButton, isLive && styles.endButton, (isSaving || isConnecting) && styles.disabledButton, { paddingVertical: 10, borderRadius: 10 }]} onPress={() => isLive ? stopLive() : startLive()}><View style={[styles.liveDot, isLive && styles.liveDotOn]} /><Text style={[styles.liveButtonText, { fontSize: 12 }]}>{isConnecting ? 'CONNECTING…' : isSaving ? 'UPDATING GAME…' : isLive ? 'STOP LIVE' : 'START LIVE'}</Text></Pressable>
               {gameId && !!getOrganizerSecret() && <Pressable accessibilityLabel="Back up organizer access" onPress={() => void Share.share({ message: `Bleachers organizer access — keep private\nGame code: ${gameId.slice(0, 6)}\nOrganizer PIN: ${getOrganizerSecret()}` })}><Text style={styles.clockAction}>BACK UP ORGANIZER ACCESS</Text></Pressable>}
+              {!isLive && gameId && (
+                <View style={{ flexDirection: 'row', gap: 5, marginTop: 4 }}>
+                  <Pressable style={[styles.secondaryButton, { flex: 1, backgroundColor: 'rgba(230,49,71,0.2)' }]} onPress={confirmEndGame}>
+                    <Text style={[styles.secondaryButtonText, { color: '#FF5D6E' }]}>END GAME</Text>
+                  </Pressable>
+                  <Pressable style={[styles.secondaryButton, { flex: 1 }]} onPress={leaveGame}>
+                    <Text style={styles.secondaryButtonText}>LEAVE GAME</Text>
+                  </Pressable>
+                </View>
+              )}
             </View>}
             
             {!isLive && <ScrollView style={styles.eventFeed} contentContainerStyle={styles.eventFeedContent}>
