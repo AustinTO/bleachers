@@ -4,7 +4,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "deploy": "wrangler pages deploy dist --project-name bleachers-viewer"
   },
   "dependencies": {
     "@moq/hang": "^0.4.3",

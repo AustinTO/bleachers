@@ -928,7 +928,7 @@ function App() {
   // Short codes are accepted by the API, but media namespaces use the
   // canonical UUID returned in the game record.
   const [broadcastName, setBroadcastName] = useState(params.get('name') ?? '');
-  const [activeTab, setActiveTab] = useState<'timeline' | 'moments' | 'organizer'>('timeline');
+  const [activeTab, setActiveTab] = useState<'timeline' | 'moments' | 'settings' | 'organizer'>('timeline');
 
   useEffect(() => {
     if (!gameId) return;
@@ -1069,6 +1069,7 @@ function App() {
     <div className="tab-bar">
       <button className={`tab ${activeTab === 'timeline' ? 'active' : ''}`} onClick={() => setActiveTab('timeline')}>Timeline</button>
       {!isPublisher ? <button className={`tab ${activeTab === 'moments' ? 'active' : ''}`} onClick={() => setActiveTab('moments')}>My Moments {savedMoments.length ? `(${savedMoments.length})` : ''}</button> : null}
+      {user && !isPublisher ? <button className={`tab ${activeTab === 'settings' ? 'active' : ''}`} onClick={() => setActiveTab('settings')}>Settings</button> : null}
       {isOrganizer ? <button className={`tab ${activeTab === 'organizer' ? 'active' : ''}`} onClick={() => setActiveTab('organizer')}>Organizer</button> : null}
     </div>
 
@@ -1084,6 +1085,26 @@ function App() {
         <div className="timeline-head"><h2>My saved moments</h2><span>{savedMoments.length} saved</span></div>
         {savedMoments.length ? savedMoments.map((moment) => <TimelineEventItem key={moment.id} event={{ id: moment.id, sequence: 0, kind: 'HIGHLIGHT', gameTimeSeconds: moment.game_time_seconds, createdAt: new Date(moment.media_at_ms).toISOString() }} game={game} gameId={canonicalGameId || gameId} onPlay={() => playReplay({ id: moment.id, sequence: 0, kind: 'HIGHLIGHT', gameTimeSeconds: moment.game_time_seconds, createdAt: new Date(moment.media_at_ms).toISOString() })} isMoment={true} momentReady={moment.media_ready} />) : <p className="muted">No moments saved yet. Click the ☆ SAVE MOMENT button during the game.</p>}
         {!user ? <div style={{ marginTop: '24px', padding: '16px', background: 'rgba(255,255,255,0.05)', borderRadius: '12px', textAlign: 'center' }}><p style={{ margin: '0 0 12px 0' }}>Sign in to save your moments permanently across all your devices.</p><button onClick={() => setShowAuth(true)} style={{ background: 'var(--accent)', color: '#000', padding: '8px 16px', borderRadius: '8px', fontWeight: 'bold', border: 'none', cursor: 'pointer' }}>Sign In</button></div> : <p className="muted" style={{ marginTop: '24px' }}>Your moments are permanently saved to your account.</p>}
+      </section>
+    )}
+
+    {activeTab === 'settings' && user && !isPublisher && (
+      <section className="tab-content">
+        <h2>Account Settings</h2>
+        <div style={{ marginTop: '24px', padding: '16px', background: 'rgba(255,255,255,0.05)', borderRadius: '12px' }}>
+          <p style={{ margin: '0 0 16px 0', fontSize: '18px', fontWeight: 'bold' }}>Integrations</p>
+          <p className="muted" style={{ marginBottom: '16px' }}>Connect external accounts to sync teams and schedules directly.</p>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px', background: 'rgba(0,0,0,0.3)', borderRadius: '8px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <div style={{ width: '32px', height: '32px', background: '#00C73C', borderRadius: '6px', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontWeight: 'bold' }}>B</div>
+              <div>
+                <strong>BAND</strong>
+                <div style={{ fontSize: '13px', color: '#888' }}>Sync your teams from BAND.us</div>
+              </div>
+            </div>
+            <button onClick={() => window.location.href = `${API}/v1/auth/band`} style={{ background: 'var(--accent)', color: '#000', padding: '6px 16px', borderRadius: '16px', fontWeight: 'bold', border: 'none', cursor: 'pointer' }}>Connect</button>
+          </div>
+        </div>
       </section>
     )}
 

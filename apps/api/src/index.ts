@@ -1,6 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { requestAuthCode, verifyAuthCode, mergeAuth, getMe } from "./auth";
 import { createOrganization, createTeam, getMyOrganizationsAndTeams } from "./teams";
+import { bandAuthRoute } from "./band";
 
 export interface Env {
   DB: D1Database;
@@ -13,6 +14,9 @@ export interface Env {
   MOQ_DEFAULT_VIEWER_TOKEN?: string;
   /** `cloudflare` = draft-16 JWT path; default = moq.live moq-lite (MoQKit-compatible). */
   MOQ_PROFILE?: string;
+  BAND_CLIENT_ID?: string;
+  BAND_CLIENT_SECRET?: string;
+  FRONTEND_URL?: string;
   /** Unused; draft selection is implied by MOQ_PROFILE. */
   MOQ_DRAFT?: string;
   EMAIL?: any;
@@ -183,6 +187,7 @@ export default {
     else if (request.method === 'POST' && url.pathname === '/v1/auth/request-code') response = await requestAuthCode(request, env);
     else if (request.method === 'POST' && url.pathname === '/v1/auth/verify') response = await verifyAuthCode(request, env);
     else if (request.method === 'POST' && url.pathname === '/v1/auth/merge') response = await mergeAuth(request, env);
+    else if (request.method === 'GET' && url.pathname.startsWith('/v1/auth/band')) response = await bandAuthRoute(request, env, url.pathname);
     else if (request.method === 'GET' && url.pathname === '/v1/users/me') response = await getMe(request, env);
     else if (request.method === 'POST' && url.pathname === '/v1/organizations') response = await createOrganization(request, env);
     else if (request.method === 'POST' && url.pathname === '/v1/teams') response = await createTeam(request, env);
