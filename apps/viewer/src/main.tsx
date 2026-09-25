@@ -903,13 +903,15 @@ function App() {
   };
   const [audioMuted, setAudioMuted] = useState(false);
   const registerRewind = useCallback((next: (event?: EventItem) => boolean) => setRewind(() => next), []);
+  const [replaySessionId, setReplaySessionId] = useState('');
   const playReplay = (event?: EventItem) => {
-    if (archivedEvent || (game?.status !== 'ended' && replayActive)) { setReplayMessage('Return to live before starting another replay.'); return; }
+    if (game?.status !== 'ended' && replayActive) { setReplayMessage('Return to live before starting another replay.'); return; }
     setReplayMessage('');
     if (game?.status !== 'ended' && rewind?.(event)) { setReplaying(event); return; }
     const target = event ?? { id: crypto.randomUUID(), sequence: 0, kind: 'HIGHLIGHT' as const, gameTimeSeconds: Math.max(0, (game?.clockSeconds ?? 0) - 10), createdAt: new Date(Date.now() - 10_000).toISOString() };
     setArchivedEvent(target);
     setReplaying(target);
+    setReplaySessionId(crypto.randomUUID());
   };
   const shareGame = async () => {
     const url = `${location.origin}/?game=${canonicalGameId || gameId}`;
@@ -1056,7 +1058,7 @@ function App() {
           <Draft16Camera relayUrl={relayUrl} broadcastName={broadcastName} capabilityIdentity={capabilityIdentity} onRewindReady={registerRewind} replayActive={replayActive} onReplayState={handleReplayState} audioMuted={audioMuted} /> : 
           <HlsPlayer gameId={canonicalGameId || gameId} /> : 
       <div className="video-placeholder"><div className="play-orb">▶</div><p>{isPublisher ? 'Requesting camera publishing capability…' : 'Requesting live viewing capability…'}</p></div>}
-      {archivedEvent ? <ArchivedReplay gameId={canonicalGameId || gameId} game={game} event={archivedEvent} onClose={() => { setArchivedEvent(undefined); setReplaying(undefined); }} /> : null}
+      {archivedEvent ? <ArchivedReplay key={replaySessionId} gameId={canonicalGameId || gameId} game={game} event={archivedEvent} onClose={() => { setArchivedEvent(undefined); setReplaying(undefined); }} /> : null}
       <div className="stage-overlay"><div className="stage-overlay-score"><b>{game?.homeTeam ?? 'HOME'} {game?.homeScore ?? '—'} · {game?.awayScore ?? '—'} {game?.awayTeam ?? 'AWAY'}</b><span>{clock}</span></div><div className="stage-overlay-actions">{saveStatus ? <span className="stage-save-status" role="status">{saveStatus}</span> : null}{!isPublisher ? <><button onClick={() => { setReplayActive(false); setArchivedEvent(undefined); setReplaying(undefined); setReplayMessage(''); }}>● LIVE</button><button disabled={saveDisabled} onClick={() => void saveMoment()}>☆ SAVE</button><button onClick={() => setAudioMuted((muted) => !muted)}>{audioMuted ? '🔇' : '🔊'}</button></> : null}<button onClick={() => void toggleFullScreen()} aria-label={fullScreen ? 'Exit fullscreen video' : 'Fullscreen video'}>{fullScreen ? '↙ EXIT' : '⛶ FULLSCREEN'}</button></div></div>
     </section>
     
@@ -1208,7 +1210,6 @@ function HlsPlayer({ gameId }: { gameId: string }) {
       </span>
       <video 
         ref={videoRef}
-        controls
         playsInline
         autoPlay
         muted // Needed for autoplay policy
@@ -1364,9 +1365,17 @@ function TimelineEventItem({ event, gameId, game, onPlay, isMoment = false, mome
       </span>
       <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
         {game?.status === 'ended' && (isMoment ? momentReady : true) && (
-          <button className="download-btn" onClick={handleDownload} disabled={downloading} title="Download MP4" style={{ background: 'rgba(255,255,255,0.1)', border: 'none', borderRadius: '8px', padding: '8px 12px', cursor: 'pointer', color: 'white', fontWeight: 'bold' }}>
-            {downloading ? '⬇️...' : '⬇️'}
-          </button>
+          <div className="dropdown" onClick={(e) => e.stopPropagation()}>
+            <select 
+              onChange={(e) => { if (e.target.value === 'download') { handleDownload(e as any); e.target.value = ''; } }}
+              disabled={downloading}
+              title="Options"
+              style={{ background: 'rgba(255,255,255,0.1)', border: 'none', borderRadius: '8px', padding: '8px 12px', cursor: 'pointer', color: 'white', fontWeight: 'bold', appearance: 'none' }}
+            >
+              <option value="" disabled selected>{downloading ? '⬇️...' : '⋮ Options'}</option>
+              <option value="download" style={{ color: 'black' }}>⬇️ Download MP4</option>
+            </select>
+          </div>
         )}
         <span style={{ padding: '0 8px' }}>›</span>
       </div>
