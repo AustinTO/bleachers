@@ -200,15 +200,50 @@ export default {
   async scheduled(event, env, ctx) {
     const cutoffMs = Date.now() - 7 * 24 * 60 * 60 * 1000;
     const old = await env.DB.prepare('SELECT id, r2_key FROM media_segments WHERE end_ms < ? LIMIT 500').bind(cutoffMs).all<{ id: string; r2_key: string }>();
-    if (!old.results || old.results.length === 0) return;
-    const keys = old.results.map((r) => r.r2_key);
-    // Delete from R2 (could use delete array if supported, but loop is fine for now, or Promise.all)
-    await Promise.all(keys.map(k => env.MEDIA.delete(k)));
-    
-    // Delete from D1
-    const ids = old.results.map(r => r.id);
-    const placeholders = ids.map(() => '?').join(',');
-    await env.DB.prepare(`DELETE FROM media_segments WHERE id IN (${placeholders})`).bind(...ids).run();
+    if (old.results && old.results.length > 0) {
+      const keys = old.results.map((r) => r.r2_key);
+      await Promise.all(keys.map(k => env.MEDIA.delete(k)));
+      const ids = old.results.map(r => r.id);
+      const placeholders = ids.map(() => '?').join(',');
+      await env.DB.prepare(`DELETE FROM media_segments WHERE id IN (${placeholders})`).bind(...ids).run();
+    }
+
+    // Background Sync Cron for Sprint 6
+    const teams = await env.DB.prepare("SELECT id, external_id, external_source FROM teams WHERE external_source = 'se_tourney' AND external_id IS NOT NULL").all<{ id: string; external_id: string; external_source: string }>();
+    if (teams.results && teams.results.length > 0) {
+      const { SeTourneyProvider } = await import('./providers/se_tourney');
+      const provider = new SeTourneyProvider();
+      
+      for (const team of teams.results) {
+        try {
+          const schedule = await provider.fetchSchedule({ apiKey: 'mock_key' }, team.external_id);
+          for (const extGame of schedule) {
+            // Check if game exists
+            const existing = await env.DB.prepare('SELECT id, status FROM games WHERE external_id = ? AND external_source = ?').bind(extGame.externalId, team.external_source).first<{ id: string; status: string }>();
+            
+            if (!existing) {
+              // Create Draft Broadcast for imported game
+              const gameId = id();
+              const organizerSecret = organizerPin();
+              const createdAt = new Date().toISOString();
+              await env.DB.prepare(`
+                INSERT INTO games (id, home_team, away_team, created_at, organizer_secret_hash, status, team_id, external_id, external_source) 
+                VALUES (?, ?, ?, ?, ?, 'scheduled', ?, ?, ?)
+              `).bind(gameId, extGame.homeTeamName, extGame.awayTeamName, createdAt, await hashSecret(organizerSecret), team.id, extGame.externalId, team.external_source).run();
+              // Initialize Durable Object state
+              await env.GAME_STATE.getByName(gameId).create(gameId);
+            } else if (existing.status === 'scheduled') {
+              // Only update scheduled games (do not overwrite if live/ended)
+              await env.DB.prepare(`
+                UPDATE games SET home_team = ?, away_team = ? WHERE id = ?
+              `).bind(extGame.homeTeamName, extGame.awayTeamName, existing.id).run();
+            }
+          }
+        } catch (err) {
+          console.error(`Sync failed for team ${team.id}:`, err);
+        }
+      }
+    }
   },
 } satisfies ExportedHandler<Env>;
 
@@ -245,11 +280,11 @@ async function teamGamesRoute(request: Request, env: Env, teamName: string) {
 import { hlsPlaylistRoute, hlsSegmentRoute } from './hls';
 
 async function gameRoute(request: Request, env: Env, gameId: string, rest: string[]) {
-  let row = await env.DB.prepare('SELECT id, home_team, away_team, status, created_at FROM games WHERE id = ?').bind(gameId).first<{ id: string; home_team: string; away_team: string; status: string; created_at: string }>();
+  let row = await env.DB.prepare('SELECT id, home_team, away_team, status, created_at, team_id FROM games WHERE id = ?').bind(gameId).first<{ id: string; home_team: string; away_team: string; status: string; created_at: string; team_id: string | null }>();
   // The broadcaster displays a short game code. Accept it when it resolves to
   // one game; private production links should continue to use the full UUID.
   if (!row && gameId.length >= 6 && gameId.length < 36) {
-    const matches = await env.DB.prepare('SELECT id, home_team, away_team, status, created_at FROM games WHERE id LIKE ? LIMIT 2').bind(`${gameId}%`).all<{ id: string; home_team: string; away_team: string; status: string; created_at: string }>();
+    const matches = await env.DB.prepare('SELECT id, home_team, away_team, status, created_at, team_id FROM games WHERE id LIKE ? LIMIT 2').bind(`${gameId}%`).all<{ id: string; home_team: string; away_team: string; status: string; created_at: string; team_id: string | null }>();
     if (matches.results.length > 1) return error('ambiguous_game_code', 409);
     row = matches.results[0] ?? null;
   }
@@ -264,7 +299,20 @@ async function gameRoute(request: Request, env: Env, gameId: string, rest: strin
   if (protectedAction) {
     const stored = await env.DB.prepare('SELECT organizer_secret_hash FROM games WHERE id = ?').bind(resolvedGameId).first<{ organizer_secret_hash: string | null }>();
     const supplied = request.headers.get('authorization')?.match(/^Bearer (.+)$/i)?.[1];
-    if (!supplied || !stored?.organizer_secret_hash || await hashSecret(supplied) !== stored.organizer_secret_hash) return error('organizer_authorization_required', 403);
+    
+    let authorized = false;
+    if (supplied) {
+      if (stored?.organizer_secret_hash && await hashSecret(supplied) === stored.organizer_secret_hash) {
+        authorized = true;
+      } else {
+        const session = await env.DB.prepare('SELECT user_id FROM auth_sessions WHERE token = ? AND expires_at > ?').bind(supplied, Date.now()).first<{ user_id: string }>();
+        if (session && row.team_id) {
+          const membership = await env.DB.prepare("SELECT role FROM team_members WHERE team_id = ? AND user_id = ? AND role IN ('owner', 'admin', 'broadcaster', 'coach')").bind(row.team_id, session.user_id).first<{ role: string }>();
+          if (membership) authorized = true;
+        }
+      }
+    }
+    if (!authorized) return error('organizer_authorization_required', 403);
   }
   const game = env.GAME_STATE.getByName(resolvedGameId);
   if (rest[0] === 'media-segments') return mediaSegmentRoute(request, env, resolvedGameId, rest);
