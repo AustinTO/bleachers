@@ -314,7 +314,7 @@ class BleachersCameraModule : Module() {
           val bytesRead = record.read(pcm, 0, minOf(pcm.size, input.remaining()), AudioRecord.READ_BLOCKING)
           if (bytesRead > 0) {
             input.put(pcm, 0, bytesRead)
-            encoder.queueInputBuffer(inputIndex, 0, bytesRead, samplesWritten * 1_000_000L / sampleRate, 0)
+            encoder.queueInputBuffer(inputIndex, 0, bytesRead, System.nanoTime() / 1000, 0)
             samplesWritten += bytesRead / 2
           }
         }

@@ -7,8 +7,12 @@
   "vars": {
     "CLOUDFLARE_ACCOUNT_ID": "21f3f2ebe046d7bdc276a57be3064355",
     "MOQ_RELAY_ID": "ff3590aa021c413752b2cb92a6c7595e",
-    "MOQ_PROFILE": "cloudflare"
+    "MOQ_PROFILE": "cloudflare",
+    "EMAIL_FROM": "no-reply@auth.trusthentic.com"
   },
+  "send_email": [
+    { "name": "EMAIL", "allowed_sender_addresses": ["no-reply@auth.trusthentic.com"] }
+  ],
   "d1_databases": [
     {
       "binding": "DB",
@@ -27,6 +31,9 @@
   },
   "exports": {
     "GameState": { "type": "durable-object", "storage": "sqlite" }
+  },
+  "ai": {
+    "binding": "AI"
   },
   "triggers": {
     "crons": ["0 4 * * *"]

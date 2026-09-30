@@ -1,10 +1,11 @@
 import { CameraType, CameraView, useCameraPermissions } from 'expo-camera';
 import { StatusBar } from 'expo-status-bar';
 import { useKeepAwake } from 'expo-keep-awake';
+import { Accelerometer } from 'expo-sensors';
 import { useEffect, useRef, useState } from 'react';
 import { Alert, KeyboardAvoidingView, PermissionsAndroid, Platform, Pressable, SafeAreaView, ScrollView, Share, StyleSheet, Text, TextInput, View } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { api, EventKind, RemoteGame, TeamSide, getOrganizerSecret, setOrganizerSecret, setAuthToken } from './src/api';
+import { api, EventKind, RemoteGame, TeamSide, getOrganizerSecret, getAuthToken, setOrganizerSecret, setAuthToken, ApiError } from './src/api';
 import { connectCloudflareMoq, PROBE, type CloudflareMoqSession } from './src/cloudflareMoq';
 import BleachersCamera, { BleachersCameraPreview } from './modules/bleachers-camera';
 import { encodeAacFrame, encodeH264Frame } from './src/mediaEnvelope';
@@ -44,6 +45,18 @@ export default function App() {
   const [games, setGames] = useState<any[]>([]);
   const [selectedTeam, setSelectedTeam] = useState<string>();
   const [isLoadingAuth, setIsLoadingAuth] = useState(false);
+  const [userEmail, setUserEmail] = useState('');
+  const [organizations, setOrganizations] = useState<any[]>([]);
+  const [isCreatingOrg, setIsCreatingOrg] = useState(false);
+  const [newOrgName, setNewOrgName] = useState('');
+  const [isCreatingTeam, setIsCreatingTeam] = useState(false);
+  const [isEditingTeam, setIsEditingTeam] = useState(false);
+  const [newTeamName, setNewTeamName] = useState('');
+  const [newTeamLogo, setNewTeamLogo] = useState('');
+  const [newTeamColor, setNewTeamColor] = useState('');
+  const [isCreatingGame, setIsCreatingGame] = useState(false);
+  const [newHomeTeam, setNewHomeTeam] = useState('');
+  const [newAwayTeam, setNewAwayTeam] = useState('');
 
   useEffect(() => {
     AsyncStorage.getItem('authToken').then(token => {
@@ -57,17 +70,27 @@ export default function App() {
 
   const loadTeams = async () => {
     try {
+      const me = await api.getMe();
+      setUserEmail(me.email);
       const data = await api.getOrganizationsAndTeams();
-      if (data.organizations?.length > 0) {
-        const allTeams = data.organizations.flatMap((o: any) => o.teams);
-        setTeams(allTeams);
-        if (allTeams.length > 0) {
-          setSelectedTeam(allTeams[0].id);
-          loadGames(allTeams[0].id);
-        }
+      setOrganizations(data.organizations || []);
+      const allTeams = data.teams || [];
+      setTeams(allTeams);
+      if (allTeams.length > 0) {
+        setSelectedTeam(allTeams[0].id);
+        await loadGames(allTeams[0].id);
+      } else {
+        setSelectedTeam(undefined);
+        setGames([]);
       }
     } catch (e) {
-      setAppState('auth');
+      if (e instanceof ApiError && (e.status === 401 || e.status === 403)) {
+        setAuthToken('');
+        await AsyncStorage.removeItem('authToken');
+        setAppState('auth');
+      } else {
+        console.warn('Failed to load teams', e);
+      }
     }
   };
 
@@ -78,13 +101,66 @@ export default function App() {
     } catch (e) { console.warn(e); }
   };
 
+  const handleCreateOrg = async () => {
+    if (!newOrgName) return;
+    setIsLoadingAuth(true);
+    try {
+      await api.createOrganization(newOrgName);
+      setNewOrgName('');
+      setIsCreatingOrg(false);
+      await loadTeams();
+    } catch (e) { Alert.alert('Error', e instanceof Error ? e.message : 'Could not create organization'); }
+    setIsLoadingAuth(false);
+  };
+
+  const handleCreateTeam = async (orgId: string) => {
+    if (!newTeamName) return;
+    setIsLoadingAuth(true);
+    try {
+      await api.createTeam(orgId, newTeamName, newTeamLogo, newTeamColor);
+      setNewTeamName('');
+      setNewTeamLogo('');
+      setNewTeamColor('');
+      setIsCreatingTeam(false);
+      await loadTeams();
+    } catch (e) { Alert.alert('Error', e instanceof Error ? e.message : 'Could not create team'); }
+    setIsLoadingAuth(false);
+  };
+
+  const handleUpdateTeam = async () => {
+    if (!selectedTeam || !newTeamName) return;
+    setIsLoadingAuth(true);
+    try {
+      await api.updateTeam(selectedTeam, newTeamName, newTeamLogo, newTeamColor);
+      setIsEditingTeam(false);
+      await loadTeams();
+    } catch (e) { Alert.alert('Error', e instanceof Error ? e.message : 'Could not update team'); }
+    setIsLoadingAuth(false);
+  };
+
+  const handleCreateGame = async () => {
+    if (!newHomeTeam || !newAwayTeam || !selectedTeam) return;
+    setIsSaving(true);
+    try {
+      const game = await api.createGame(newHomeTeam, newAwayTeam, selectedTeam);
+      const started = await api.startGame(game.gameId);
+      setGameId(started.gameId);
+      applyRemoteGame(started);
+      setAppState('camera');
+      setIsCreatingGame(false);
+      setNewHomeTeam('');
+      setNewAwayTeam('');
+    } catch (e) { Alert.alert('Error', e instanceof Error ? e.message : 'Could not create game'); }
+    setIsSaving(false);
+  };
+
   const handleRequestCode = async () => {
     if (!email) return;
     setIsLoadingAuth(true);
     try {
       await api.requestCode(email);
       setAuthStep('otp');
-    } catch (e) { Alert.alert('Error', 'Could not request code'); }
+    } catch (e) { Alert.alert('Could not request code', e instanceof Error ? e.message : 'Please try again.'); }
     setIsLoadingAuth(false);
   };
 
@@ -96,13 +172,14 @@ export default function App() {
       setAuthToken(token);
       await AsyncStorage.setItem('authToken', token);
       setAppState('dashboard');
-      loadTeams();
-    } catch (e) { Alert.alert('Error', 'Invalid code'); }
+      await loadTeams();
+    } catch (e) { Alert.alert('Could not sign in', e instanceof Error ? e.message : 'Invalid code'); }
     setIsLoadingAuth(false);
   };
 
   const handleLogout = async () => {
     setAuthToken('');
+    setOrganizerSecret('');
     await AsyncStorage.removeItem('authToken');
     setAppState('auth');
     setAuthStep('email');
@@ -122,6 +199,7 @@ export default function App() {
       } catch { /* Allow editing an incomplete link. */ }
     }
     setJoinGameCode(value);
+    setJoinOrganizerSecret('');
   };
   const moqSession = useRef<CloudflareMoqSession | undefined>(undefined);
   const liveRef = useRef(false);
@@ -164,12 +242,14 @@ export default function App() {
     }
   };
 
-  const prepareGame = async () => {
+  const prepareGame = async (targetGameCode?: string) => {
     setIsSaving(true);
     let started: RemoteGame;
     try {
-      if (joinGameCode.trim()) {
-        const existing = await api.getGame(joinGameCode.trim());
+      const codeToUse = targetGameCode || joinGameCode.trim();
+      setOrganizerSecret(joinOrganizerSecret);
+      if (codeToUse) {
+        const existing = await api.getGame(codeToUse);
         if (existing.status === 'ended') throw new Error('That game has already ended. Create a new game or use another code.');
         started = existing.status === 'live' ? existing : await api.startGame(existing.gameId);
       } else {
@@ -201,12 +281,13 @@ export default function App() {
       await new Promise<void>((resolve) => setTimeout(resolve, 250));
       await BleachersCamera.start(1280, 720, 24, 1_200_000);
       await BleachersCamera.startAudio();
-      archiveRef.current = new MediaArchive(gameId, getOrganizerSecret());
+      archiveRef.current = new MediaArchive(gameId, getOrganizerSecret() || getAuthToken());
       
       void pumpH264(() => moqSession.current, () => reconnectMoq(gameId), () => liveRef.current, archiveRef.current).catch((cause) => {
         console.error('[bleachers:h264-pump-fatal]', cause instanceof Error ? cause.message : String(cause));
       });
       void pumpAac(() => moqSession.current, () => liveRef.current, archiveRef.current).catch((cause) => console.error('[bleachers:aac-pump-fatal]', cause instanceof Error ? cause.message : String(cause)));
+      void pumpTelemetry(gameId, () => liveRef.current);
     } catch (cause) {
       liveRef.current = false;
       await archiveRef.current?.finish();
@@ -239,8 +320,11 @@ export default function App() {
           setIsSaving(true);
           try {
             await api.endGame(gameId!);
+            await stopLive();
             setGameId(undefined);
             setIsClockRunning(false);
+            setAppState('dashboard');
+            loadTeams();
           } catch (cause) {
             Alert.alert('Failed to end game', cause instanceof Error ? cause.message : 'Unknown error');
           } finally { setIsSaving(false); }
@@ -251,9 +335,12 @@ export default function App() {
   const leaveGame = () => {
     Alert.alert('Leave Game', 'Return to the setup screen? The game will remain active.', [
       { text: 'Cancel', style: 'cancel' },
-      { text: 'Leave', onPress: () => {
+      { text: 'Leave', onPress: async () => {
+          await stopLive();
           setGameId(undefined);
           setIsClockRunning(false);
+          setAppState('dashboard');
+          loadTeams();
       }}
     ]);
   };
@@ -325,25 +412,65 @@ export default function App() {
         ) : appState === 'dashboard' ? (
           <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1, justifyContent: 'center' }}>
             <View style={styles.setupCard}>
-              <View style={[styles.header, { paddingBottom: 16 }]}><Text style={styles.eyebrow}>YOUR TEAMS</Text><Pressable onPress={handleLogout}><Text style={styles.connection}>LOGOUT</Text></Pressable></View>
-              {teams.length === 0 ? <Text style={styles.emptyEvents}>No teams found.</Text> : (
-                <View style={styles.setupForm}>
-                  {teams.map(t => (
-                    <Pressable key={t.id} onPress={() => { setSelectedTeam(t.id); loadGames(t.id); }} style={[styles.secondaryButton, selectedTeam === t.id && { backgroundColor: 'rgba(143,245,175,0.15)' }]}>
-                      <Text style={[styles.secondaryButtonText, selectedTeam === t.id && { color: '#8FF5AF' }]}>{t.name}</Text>
-                    </Pressable>
-                  ))}
-                  
-                  <Text style={[styles.eyebrow, { marginTop: 16 }]}>SCHEDULED GAMES</Text>
-                  {games.length === 0 ? <Text style={styles.emptyEvents}>No games found.</Text> : games.map(g => (
-                    <Pressable key={g.gameId} onPress={() => { updateJoinGame(g.gameId); setJoinOrganizerSecret('dummy'); setAppState('camera'); }} style={[styles.setupForm, { backgroundColor: 'rgba(255,255,255,0.05)', padding: 12, borderRadius: 8 }]}>
-                      <Text style={{ color: 'white', fontWeight: 'bold' }}>{g.homeTeam} vs {g.awayTeam}</Text>
-                      <Text style={styles.eventTime}>{new Date(g.createdAt).toLocaleDateString()} - {g.status}</Text>
-                    </Pressable>
-                  ))}
-                </View>
-              )}
-              <Pressable disabled={isSaving || isConnecting} style={[styles.liveButton, { marginTop: 24, paddingVertical: 14, borderRadius: 10 }, (isSaving || isConnecting) && styles.disabledButton]} onPress={() => { if (joinGameCode) { setAppState('camera'); prepareGame(); } }}><Text style={[styles.liveButtonText, { fontSize: 14 }]}>{isSaving ? 'PREPARING…' : 'GO LIVE'}</Text></Pressable>
+              <View style={[styles.header, { paddingBottom: 16 }]}><Text style={styles.eyebrow}>YOUR TEAMS {userEmail ? `(${userEmail})` : ''}</Text><Pressable onPress={handleLogout}><Text style={styles.connection}>LOGOUT</Text></Pressable></View>
+              <ScrollView style={{ maxHeight: 400 }}>
+                {organizations.length === 0 && !isCreatingOrg ? (
+                  <View style={styles.setupForm}>
+                    <Text style={styles.emptyEvents}>No organizations found.</Text>
+                    <Pressable style={styles.secondaryButton} onPress={() => setIsCreatingOrg(true)}><Text style={styles.secondaryButtonText}>CREATE ORGANIZATION</Text></Pressable>
+                  </View>
+                ) : isCreatingOrg ? (
+                  <View style={styles.setupForm}>
+                    <TextInput placeholder="Organization Name" placeholderTextColor="#7EA28B" value={newOrgName} onChangeText={setNewOrgName} style={styles.gameCodeInput} />
+                    <Pressable style={styles.liveButton} onPress={handleCreateOrg}><Text style={styles.liveButtonText}>CREATE</Text></Pressable>
+                    <Pressable style={styles.secondaryButton} onPress={() => setIsCreatingOrg(false)}><Text style={styles.secondaryButtonText}>CANCEL</Text></Pressable>
+                  </View>
+                ) : isCreatingTeam || isEditingTeam ? (
+                  <View style={styles.setupForm}>
+                    <TextInput placeholder="Team Name" placeholderTextColor="#7EA28B" value={newTeamName} onChangeText={setNewTeamName} style={styles.gameCodeInput} />
+                    <TextInput placeholder="Logo URL (optional)" placeholderTextColor="#7EA28B" value={newTeamLogo} onChangeText={setNewTeamLogo} style={styles.gameCodeInput} autoCapitalize="none" keyboardType="url" />
+                    <TextInput placeholder="Primary Color (e.g., #FF0000)" placeholderTextColor="#7EA28B" value={newTeamColor} onChangeText={setNewTeamColor} style={styles.gameCodeInput} autoCapitalize="none" />
+                    <Pressable style={styles.liveButton} onPress={isEditingTeam ? handleUpdateTeam : () => handleCreateTeam(organizations[0].id)}><Text style={styles.liveButtonText}>{isEditingTeam ? 'SAVE TEAM' : 'CREATE TEAM'}</Text></Pressable>
+                    <Pressable style={styles.secondaryButton} onPress={() => { setIsCreatingTeam(false); setIsEditingTeam(false); }}><Text style={styles.secondaryButtonText}>CANCEL</Text></Pressable>
+                  </View>
+                ) : isCreatingGame ? (
+                  <View style={styles.setupForm}>
+                    <TextInput placeholder="Home Team" placeholderTextColor="#7EA28B" value={newHomeTeam} onChangeText={setNewHomeTeam} style={styles.gameCodeInput} />
+                    <TextInput placeholder="Away Team" placeholderTextColor="#7EA28B" value={newAwayTeam} onChangeText={setNewAwayTeam} style={styles.gameCodeInput} />
+                    <Pressable style={styles.liveButton} onPress={handleCreateGame}><Text style={styles.liveButtonText}>CREATE GAME</Text></Pressable>
+                    <Pressable style={styles.secondaryButton} onPress={() => setIsCreatingGame(false)}><Text style={styles.secondaryButtonText}>CANCEL</Text></Pressable>
+                  </View>
+                ) : (
+                  <View style={styles.setupForm}>
+                    {teams.map(t => (
+                      <Pressable key={t.id} onPress={() => { setSelectedTeam(t.id); loadGames(t.id); }} style={[styles.secondaryButton, selectedTeam === t.id && { backgroundColor: 'rgba(143,245,175,0.15)' }]}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center' }}>
+                          <Text style={[styles.secondaryButtonText, selectedTeam === t.id && { color: '#8FF5AF' }]}>{t.name}</Text>
+                          {selectedTeam === t.id && (
+                            <Pressable style={{ marginLeft: 16, padding: 4 }} onPress={() => { setNewTeamName(t.name); setNewTeamLogo(t.logo_url || ''); setNewTeamColor(t.primary_color || ''); setIsEditingTeam(true); }}>
+                              <Text style={{ color: '#7EA28B', fontSize: 12 }}>EDIT</Text>
+                            </Pressable>
+                          )}
+                        </View>
+                      </Pressable>
+                    ))}
+                    <Pressable style={styles.secondaryButton} onPress={() => { setNewTeamName(''); setNewTeamLogo(''); setNewTeamColor(''); setIsCreatingTeam(true); }}><Text style={styles.secondaryButtonText}>+ ADD TEAM</Text></Pressable>
+                    
+                    {selectedTeam && (
+                      <>
+                        <Text style={[styles.eyebrow, { marginTop: 16 }]}>SCHEDULED GAMES</Text>
+                        <Pressable style={styles.secondaryButton} onPress={() => setIsCreatingGame(true)}><Text style={styles.secondaryButtonText}>+ CREATE NEW GAME</Text></Pressable>
+                        {games.length === 0 ? <Text style={styles.emptyEvents}>No games found.</Text> : games.map(g => (
+                          <Pressable key={g.gameId} onPress={() => { updateJoinGame(g.gameId); setAppState('camera'); prepareGame(g.gameId); }} style={[styles.setupForm, { backgroundColor: 'rgba(255,255,255,0.05)', padding: 12, borderRadius: 8 }]}>
+                            <Text style={{ color: 'white', fontWeight: 'bold' }}>{g.homeTeam} vs {g.awayTeam}</Text>
+                            <Text style={styles.eventTime}>{new Date(g.createdAt).toLocaleDateString()} - {g.status}</Text>
+                          </Pressable>
+                        ))}
+                      </>
+                    )}
+                  </View>
+                )}
+              </ScrollView>
             </View>
           </KeyboardAvoidingView>
         ) : (
@@ -387,6 +514,34 @@ async function pumpH264(getSession: () => CloudflareMoqSession | undefined, onDi
       }
     }
   } finally { await archive?.finish(); }
+}
+
+let currentMotionVariance = 0;
+
+async function pumpTelemetry(gameId: string, isStillLive: () => boolean) {
+  let sub: any;
+  try {
+    Accelerometer.setUpdateInterval(200);
+    let lastZ = 0;
+    sub = Accelerometer.addListener(data => {
+      const diff = Math.abs(data.z - lastZ);
+      currentMotionVariance = Math.max(currentMotionVariance, diff * 10);
+      lastZ = data.z;
+    });
+    
+    while (isStillLive()) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 2000));
+      if (!isStillLive()) break;
+      // Simulate audio level between 0 and 10000, spike randomly
+      const audioSpike = Math.random() > 0.9 ? 8000 + Math.random() * 2000 : Math.random() * 2000;
+      await api.sendTelemetry(gameId, audioSpike, currentMotionVariance);
+      currentMotionVariance = 0;
+    }
+  } catch (e) {
+    console.error('[bleachers:telemetry-pump-fatal]', e);
+  } finally {
+    if (sub) sub.remove();
+  }
 }
 
 async function pumpAac(getSession: () => CloudflareMoqSession | undefined, isStillLive: () => boolean, archive?: MediaArchive) {

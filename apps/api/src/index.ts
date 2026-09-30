@@ -1,7 +1,8 @@
 import { DurableObject } from 'cloudflare:workers';
 import { requestAuthCode, verifyAuthCode, mergeAuth, getMe, authMiddleware } from "./auth";
-import { createOrganization, createTeam, getMyOrganizationsAndTeams } from "./teams";
+import { createOrganization, createTeam, updateTeam, getMyOrganizationsAndTeams } from "./teams";
 import { bandAuthRoute } from "./band";
+import { handleTelemetry } from "./ai";
 
 export interface Env {
   DB: D1Database;
@@ -19,7 +20,10 @@ export interface Env {
   FRONTEND_URL?: string;
   /** Unused; draft selection is implied by MOQ_PROFILE. */
   MOQ_DRAFT?: string;
-  EMAIL?: any;
+  EMAIL?: SendEmail;
+  EMAIL_FROM?: string;
+  AI: any;
+  GEMINI_API_KEY?: string;
 }
 
 type TeamSide = 'home' | 'away';
@@ -55,7 +59,7 @@ const cors = (response: Response, request?: Request) => {
   headers.set('access-control-allow-origin', origin);
   if (origin !== '*') headers.set('access-control-allow-credentials', 'true');
   headers.set('access-control-allow-methods', 'GET,POST,OPTIONS');
-  headers.set('access-control-allow-headers', 'content-type, authorization, x-capture-start-ms, x-capture-end-ms, x-user-id');
+  headers.set('access-control-allow-headers', 'content-type, authorization, x-capture-start-ms, x-capture-end-ms');
   return new Response(response.body, { status: response.status, headers });
 };
 
@@ -191,6 +195,7 @@ export default {
     else if (request.method === 'GET' && url.pathname === '/v1/users/me') response = await getMe(request, env);
     else if (request.method === 'POST' && url.pathname === '/v1/organizations') response = await createOrganization(request, env);
     else if (request.method === 'POST' && url.pathname === '/v1/teams') response = await createTeam(request, env);
+    else if (request.method === 'PUT' && parts[0] === 'v1' && parts[1] === 'teams' && parts[2] && !parts[3]) response = await updateTeam(request, env, parts[2]);
     else if (request.method === 'GET' && url.pathname === '/v1/users/me/organizations') response = await getMyOrganizationsAndTeams(request, env);
     else if (parts[0] === 'v1' && parts[1] === 'games' && parts[2]) response = await gameRoute(request, env, parts[2], parts.slice(3));
     else if (request.method === 'GET' && parts[0] === 'v1' && parts[1] === 'teams' && parts[2] && parts[3] === 'games') response = await teamGamesRoute(request, env, parts[2]);
@@ -295,11 +300,23 @@ async function teamGamesRoute(request: Request, env: Env, teamId: string) {
 import { hlsPlaylistRoute, hlsSegmentRoute } from './hls';
 
 async function gameRoute(request: Request, env: Env, gameId: string, rest: string[]) {
-  let row = await env.DB.prepare('SELECT id, home_team, away_team, status, created_at, team_id FROM games WHERE id = ?').bind(gameId).first<{ id: string; home_team: string; away_team: string; status: string; created_at: string; team_id: string | null }>();
+  let row = await env.DB.prepare(`
+    SELECT g.id, g.home_team, g.away_team, g.status, g.created_at, g.team_id,
+           t.name AS team_name, t.logo_url AS team_logo, t.primary_color AS team_color
+    FROM games g
+    LEFT JOIN teams t ON g.team_id = t.id
+    WHERE g.id = ?
+  `).bind(gameId).first<{ id: string; home_team: string; away_team: string; status: string; created_at: string; team_id: string | null; team_name: string | null; team_logo: string | null; team_color: string | null }>();
   // The broadcaster displays a short game code. Accept it when it resolves to
   // one game; private production links should continue to use the full UUID.
   if (!row && gameId.length >= 6 && gameId.length < 36) {
-    const matches = await env.DB.prepare('SELECT id, home_team, away_team, status, created_at, team_id FROM games WHERE id LIKE ? LIMIT 2').bind(`${gameId}%`).all<{ id: string; home_team: string; away_team: string; status: string; created_at: string; team_id: string | null }>();
+    const matches = await env.DB.prepare(`
+      SELECT g.id, g.home_team, g.away_team, g.status, g.created_at, g.team_id,
+             t.name AS team_name, t.logo_url AS team_logo, t.primary_color AS team_color
+      FROM games g
+      LEFT JOIN teams t ON g.team_id = t.id
+      WHERE g.id LIKE ? LIMIT 2
+    `).bind(`${gameId}%`).all<{ id: string; home_team: string; away_team: string; status: string; created_at: string; team_id: string | null; team_name: string | null; team_logo: string | null; team_color: string | null }>();
     if (matches.results.length > 1) return error('ambiguous_game_code', 409);
     row = matches.results[0] ?? null;
   }
@@ -310,7 +327,7 @@ async function gameRoute(request: Request, env: Env, gameId: string, rest: strin
   if (request.method === 'GET' && rest[0] === 'hls' && rest[1] === 'segment' && rest[2]) return hlsSegmentRoute(request, env, resolvedGameId, rest[2]);
   
   const capabilityInput = rest[0] === 'media-capability' ? await body<{ role?: string }>(request.clone()) : null;
-  const protectedAction = request.method === 'POST' && (['start', 'end', 'commands', 'media-segments', 'broadcast-simulcast'].includes(rest[0]) || rest[0] === 'media-capability' && capabilityInput?.role === 'publisher');
+  const protectedAction = request.method === 'POST' && (['start', 'end', 'commands', 'media-segments', 'telemetry', 'broadcast-simulcast'].includes(rest[0]) || rest[0] === 'media-capability' && capabilityInput?.role === 'publisher');
   if (protectedAction) {
     const stored = await env.DB.prepare('SELECT organizer_secret_hash FROM games WHERE id = ?').bind(resolvedGameId).first<{ organizer_secret_hash: string | null }>();
     const supplied = request.headers.get('authorization')?.match(/^Bearer (.+)$/i)?.[1];
@@ -332,8 +349,16 @@ async function gameRoute(request: Request, env: Env, gameId: string, rest: strin
   const game = env.GAME_STATE.getByName(resolvedGameId);
   if (rest[0] === 'media-segments') return mediaSegmentRoute(request, env, resolvedGameId, rest);
   if (request.method === 'GET' && rest.length === 0) {
+    let homeTeamDetails = undefined;
+    let awayTeamDetails = undefined;
+    if (row.team_name) {
+      const details = { name: row.team_name, logoUrl: row.team_logo, primaryColor: row.team_color };
+      if (row.home_team === row.team_name) homeTeamDetails = details;
+      else if (row.away_team === row.team_name) awayTeamDetails = details;
+      else homeTeamDetails = details;
+    }
     const snapshot = await game.getSnapshot() as any;
-    return json({ game: { status: row.status, homeScore: 0, awayScore: 0, clockSeconds: 0, clockRunning: false, sequence: 0, events: [], ...snapshot, homeTeam: row.home_team, awayTeam: row.away_team, createdAt: row.created_at } });
+    return json({ game: { status: row.status, homeScore: 0, awayScore: 0, clockSeconds: 0, clockRunning: false, sequence: 0, events: [], ...snapshot, homeTeam: row.home_team, awayTeam: row.away_team, homeTeamDetails, awayTeamDetails, createdAt: row.created_at } });
   }
   if (request.method === 'GET' && rest[0] === 'events') {
     const records = await env.DB.prepare('SELECT payload_json FROM game_events WHERE game_id = ? ORDER BY sequence DESC LIMIT 1000').bind(resolvedGameId).all<{ payload_json: string }>();
@@ -345,6 +370,9 @@ async function gameRoute(request: Request, env: Env, gameId: string, rest: strin
     try { snapshot = await game.start(); } catch { return error('game_not_scheduled', 409); }
     await env.DB.prepare("UPDATE games SET status = 'live', started_at = COALESCE(started_at, ?) WHERE id = ?").bind(new Date().toISOString(), resolvedGameId).run();
     return json({ game: { ...snapshot, homeTeam: row.home_team, awayTeam: row.away_team } });
+  }
+  if (request.method === 'POST' && rest[0] === 'telemetry') {
+    return handleTelemetry(request, env, resolvedGameId);
   }
   if (request.method === 'POST' && rest[0] === 'end') {
     let snapshot: GameSnapshot;

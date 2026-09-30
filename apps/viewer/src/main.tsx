@@ -4,12 +4,13 @@ import { MoqtConnection } from '@moqt/webtransport';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Muxer, ArrayBufferTarget } from 'mp4-muxer';
+import { Overlay } from './Overlay';
 import './styles.css';
 
 type EventKind = 'GOAL' | 'SAVE' | 'FOUL' | 'HIGHLIGHT' | 'GOAL_CORRECTION';
 type EventItem = { id: string; sequence: number; kind: EventKind; team?: 'home' | 'away'; gameTimeSeconds: number; createdAt?: string };
 type SavedMoment = { id: string; event_id: string | null; game_time_seconds: number; created_at: string; media_at_ms: number; media_ready: number };
-type Game = { gameId: string; homeTeam: string; awayTeam: string; createdAt?: string; status: string; homeScore: number; awayScore: number; clockSeconds: number; clockRunning: boolean; events: EventItem[] };
+export type Game = { gameId: string; homeTeam: string; awayTeam: string; homeTeamDetails?: { name: string; logoUrl?: string; primaryColor?: string }; awayTeamDetails?: { name: string; logoUrl?: string; primaryColor?: string }; createdAt?: string; status: string; homeScore: number; awayScore: number; clockSeconds: number; clockRunning: boolean; events: EventItem[] };
 type Capability = { relayUrl: string; broadcastName: string; expires?: string; capabilityIdentity?: unknown; profile?: string; draft?: string };
 type ObjectLocation = { groupId: bigint; objectId: bigint; timestampUs: number; keyframe: boolean };
 type BufferedFrame = { keyframe: boolean; timestampUs: number; receivedAtMs: number; payload: Uint8Array; groupId: bigint; objectId: bigint };
@@ -36,7 +37,7 @@ function getCapability(gameId: string, role: 'publisher' | 'viewer', organizerSe
   return request;
 }
 
-function Draft16Camera({ relayUrl, broadcastName, capabilityIdentity, onRewindReady, replayActive, onReplayState, audioMuted }: { relayUrl: string; broadcastName: string; capabilityIdentity?: unknown; onRewindReady: (rewind: (event?: EventItem) => boolean) => void; replayActive: boolean; onReplayState: (active: boolean) => void; audioMuted: boolean }) {
+function Draft16Camera({ game, relayUrl, broadcastName, capabilityIdentity, onRewindReady, replayActive, onReplayState, audioMuted }: { game?: Game; relayUrl: string; broadcastName: string; capabilityIdentity?: unknown; onRewindReady: (rewind: (event?: EventItem) => boolean) => void; replayActive: boolean; onReplayState: (active: boolean) => void; audioMuted: boolean }) {
   const [imageUrl, setImageUrl] = useState('');
   const [mediaError, setMediaError] = useState('');
   const [mediaState, setMediaState] = useState<MediaState>('connecting');
@@ -303,6 +304,7 @@ function Draft16Camera({ relayUrl, broadcastName, capabilityIdentity, onRewindRe
 
   return (
     <div className="camera-stage">
+      <Overlay game={game} />
       <span className={`media-health media-health-${mediaState}`}>
         <span className="media-health-dot" />
         {mediaState === 'live' ? 'LIVE' : mediaState === 'degraded' ? 'VIDEO DELAYED' : mediaState === 'reconnecting' ? 'RECONNECTING' : mediaState === 'waiting' ? 'WAITING FOR CAMERA' : 'CONNECTING'}
@@ -750,14 +752,24 @@ function h264Codec(annexB: Uint8Array) {
 
 const API = import.meta.env.VITE_API_URL ?? 'https://bleachers-api.austintaylorodell.workers.dev';
 const params = new URLSearchParams(location.search);
+const AUTH_TOKEN_KEY = 'bleachers.auth-token';
+const VIEWER_SESSION_KEY = 'bleachers.viewer-session';
+
+function getAuthToken() {
+  try { return localStorage.getItem(AUTH_TOKEN_KEY) ?? ''; }
+  catch { return ''; }
+}
+
+function authHeaders(token = getAuthToken()): Record<string, string> {
+  return token ? { authorization: `Bearer ${token}` } : {};
+}
 
 function getViewerSessionId() {
-  const key = 'bleachers.viewer-session';
   try {
-    const existing = localStorage.getItem(key);
+    const existing = localStorage.getItem(VIEWER_SESSION_KEY);
     if (existing) return existing;
     const created = crypto.randomUUID();
-    localStorage.setItem(key, created);
+    localStorage.setItem(VIEWER_SESSION_KEY, created);
     return created;
   } catch { return crypto.randomUUID(); }
 }
@@ -772,6 +784,7 @@ function OrganizerDashboard({ user, onShowAuth }: { user?: User; onShowAuth: () 
   const [awayTeam, setAwayTeam] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [teamError, setTeamError] = useState('');
   const [createdGame, setCreatedGame] = useState<string>();
   const [createdSecret, setCreatedSecret] = useState('');
   
@@ -789,26 +802,28 @@ function OrganizerDashboard({ user, onShowAuth }: { user?: User; onShowAuth: () 
   useEffect(() => {
     if (user) {
       setLoadingTeams(true);
-      fetch(`${API}/v1/users/me/organizations`, { credentials: 'include' })
-        .then(r => r.json())
-        .then((data: any) => {
-          if (data.organizations?.length > 0) {
-            const allTeams = data.organizations.flatMap((o: any) => o.teams);
-            setTeams(allTeams);
-            if (allTeams.length > 0) setSelectedTeam(allTeams[0].id);
-          }
+      setTeamError('');
+      fetch(`${API}/v1/users/me/organizations`, { headers: authHeaders() })
+        .then(r => { if (!r.ok) throw new Error('Teams could not be loaded'); return r.json(); })
+        .then((data: { teams?: { id: string }[] }) => {
+          const availableTeams = data.teams ?? [];
+          setTeams(availableTeams);
+          setSelectedTeam(availableTeams[0]?.id);
         })
+        .catch((cause) => setTeamError(cause instanceof Error ? cause.message : 'Teams could not be loaded'))
         .finally(() => setLoadingTeams(false));
     }
   }, [user]);
 
   useEffect(() => {
     if (user && selectedTeam) {
-      fetch(`${API}/v1/teams/${selectedTeam}/games`, { credentials: 'include' })
-        .then(r => r.json())
+      setTeamError('');
+      fetch(`${API}/v1/teams/${selectedTeam}/games`, { headers: authHeaders() })
+        .then(r => { if (!r.ok) throw new Error('Team games could not be loaded'); return r.json(); })
         .then((data: any) => {
           setGames(data.games || []);
-        });
+        })
+        .catch((cause) => setTeamError(cause instanceof Error ? cause.message : 'Team games could not be loaded'));
     }
   }, [user, selectedTeam]);
 
@@ -818,7 +833,7 @@ function OrganizerDashboard({ user, onShowAuth }: { user?: User; onShowAuth: () 
     try {
       const response = await fetch(`${API}/v1/games`, { 
         method: 'POST', 
-        headers: { 'content-type': 'application/json' }, 
+        headers: { 'content-type': 'application/json', ...authHeaders() },
         body: JSON.stringify({ homeTeam, awayTeam, teamId: selectedTeam }) 
       });
       if (!response.ok) throw new Error('Game could not be created');
@@ -836,6 +851,7 @@ function OrganizerDashboard({ user, onShowAuth }: { user?: User; onShowAuth: () 
     <section className="setup-card">
       <span className="tag">DASHBOARD</span>
       <h1>Your Teams & Games</h1>
+      {teamError ? <p className="error">{teamError}</p> : null}
       {loadingTeams ? <p>Loading teams...</p> : 
        teams.length === 0 ? <p className="muted">You are not a member of any teams yet.</p> :
        <>
@@ -873,7 +889,7 @@ function OrganizerDashboard({ user, onShowAuth }: { user?: User; onShowAuth: () 
   </main>;
 }
 
-function OrganizerControls({ game, gameId, secret, onChange }: { game: Game; gameId: string; secret: string; onChange: (game: Game) => void }) {
+function OrganizerControls({ game, gameId, credential, pin, onChange }: { game: Game; gameId: string; credential: string; pin?: string; onChange: (game: Game) => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [copied, setCopied] = useState('');
@@ -887,7 +903,7 @@ function OrganizerControls({ game, gameId, secret, onChange }: { game: Game; gam
   const send = async (path: string, command?: object) => {
     setBusy(true); setError('');
     try {
-      const response = await fetch(`${API}/v1/games/${gameId}/${path}`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${secret}` }, body: command ? JSON.stringify(command) : undefined });
+      const response = await fetch(`${API}/v1/games/${gameId}/${path}`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${credential}` }, body: command ? JSON.stringify(command) : undefined });
       const payload = await response.json() as { game?: Game; error?: string };
       if (!response.ok || !payload.game) throw new Error(payload.error ?? 'Game update failed');
       onChange({ ...game, ...payload.game });
@@ -899,7 +915,7 @@ function OrganizerControls({ game, gameId, secret, onChange }: { game: Game; gam
     if (!rtmpUrl) return;
     setSimulcastBusy(true); setError('');
     try {
-      const response = await fetch(`${API}/v1/games/${gameId}/broadcast-simulcast`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${secret}` }, body: JSON.stringify({ rtmpUrl }) });
+      const response = await fetch(`${API}/v1/games/${gameId}/broadcast-simulcast`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${credential}` }, body: JSON.stringify({ rtmpUrl }) });
       if (!response.ok) throw new Error('Simulcast trigger failed');
       alert('Simulcast gateway started successfully! (Check your destination in ~30s)');
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Simulcast trigger failed'); }
@@ -920,10 +936,10 @@ function OrganizerControls({ game, gameId, secret, onChange }: { game: Game; gam
     </div>
     
     <button className="end-game" disabled={busy} onClick={() => { if (window.confirm('End this game?')) void send('end'); }}>END GAME</button></> : null}
-    <div className="share-actions"><button onClick={() => void copy('viewer', `${location.origin}/?game=${game.gameId}`)}>{copied === 'viewer' ? 'VIEWER LINK COPIED' : 'COPY VIEWER LINK'}</button><button onClick={() => void copy('organizer', `${location.origin}/?game=${game.gameId}&mode=organize#secret=${secret}`)}>{copied === 'organizer' ? 'ORGANIZER LINK COPIED' : 'COPY ORGANIZER LINK'}</button></div>
+    <div className="share-actions"><button onClick={() => void copy('viewer', `${location.origin}/?game=${game.gameId}`)}>{copied === 'viewer' ? 'VIEWER LINK COPIED' : 'COPY VIEWER LINK'}</button>{pin ? <button onClick={() => void copy('organizer', `${location.origin}/?game=${game.gameId}&mode=organize#secret=${pin}`)}>{copied === 'organizer' ? 'ORGANIZER LINK COPIED' : 'COPY ORGANIZER LINK'}</button> : null}</div>
     <p className="muted">Viewer link: <code>{location.origin}/?game={game.gameId}</code></p>
-    <p className="join-codes"><span>Game code <b>{game.gameId.slice(0, 6)}</b></span><span>Organizer PIN <code className="secret-code">{formatOrganizerPin(secret)}</code></span></p>
-    <p className="muted">Type those two codes in the broadcaster, or paste the organizer link into the game field.</p>
+    <p className="join-codes"><span>Game code <b>{game.gameId.slice(0, 6)}</b></span>{pin ? <span>Organizer PIN <code className="secret-code">{formatOrganizerPin(pin)}</code></span> : null}</p>
+    {pin ? <p className="muted">Type those two codes in the broadcaster, or paste the organizer link into the game field.</p> : <p className="muted">Sign in as a team member on the broadcaster to manage this game.</p>}
   </section>;
 }
 
@@ -942,8 +958,12 @@ function App() {
   const [showAuth, setShowAuth] = useState(false);
 
   useEffect(() => {
-    fetch(`${API}/v1/users/me`, { credentials: 'include' })
-      .then(r => { if (r.ok) r.json().then(setUser); })
+    if (!getAuthToken()) return;
+    fetch(`${API}/v1/users/me`, { headers: authHeaders() })
+      .then(r => {
+        if (r.status === 401) localStorage.removeItem(AUTH_TOKEN_KEY);
+        if (r.ok) return r.json().then(setUser);
+      })
       .catch(() => {});
   }, []);
   const [archivedEvent, setArchivedEvent] = useState<EventItem>();
@@ -1031,7 +1051,7 @@ function App() {
   useEffect(() => {
     if (!canonicalGameId) return;
     let cancelled = false;
-    fetch(`${API}/v1/games/${canonicalGameId}/moments`, { credentials: 'include' })// ?viewerSessionId=${encodeURIComponent(viewerSessionId)}`)
+    fetch(`${API}/v1/games/${canonicalGameId}/moments?viewerSessionId=${encodeURIComponent(viewerSessionId)}`)
       .then(async (response) => { if (!response.ok) throw new Error('Saved moments unavailable'); return response.json() as Promise<{ moments: SavedMoment[] }>; })
       .then(({ moments }) => { if (!cancelled) { setSavedMoments(moments); setSaved(new Set(moments.map((moment) => moment.event_id).filter((value): value is string => !!value))); } })
       .catch(() => { /* Live viewing remains available while saves are unavailable. */ });
@@ -1057,7 +1077,7 @@ function App() {
     let cancelled = false;
     let renewal: number | undefined;
     const load = () => {
-      void getCapability(capabilityGameId, isPublisher ? 'publisher' : 'viewer', organizerSecret).then((capability) => {
+      void getCapability(capabilityGameId, isPublisher ? 'publisher' : 'viewer', isPublisher ? organizerSecret || getAuthToken() : undefined).then((capability) => {
         if (cancelled) return;
         setRelayUrl(capability.relayUrl);
         setBroadcastName(capability.broadcastName);
@@ -1138,7 +1158,7 @@ function App() {
       relayUrl && broadcastName ? 
         isPublisher ? <moq-publish-ui><moq-publish url={relayUrl} name={broadcastName} source="camera"><video muted autoPlay playsInline /></moq-publish></moq-publish-ui> : 
         ('WebTransport' in window && 'VideoDecoder' in window) ? 
-          <Draft16Camera relayUrl={relayUrl} broadcastName={broadcastName} capabilityIdentity={capabilityIdentity} onRewindReady={registerRewind} replayActive={replayActive} onReplayState={handleReplayState} audioMuted={audioMuted} /> : 
+          <Draft16Camera game={game} relayUrl={relayUrl} broadcastName={broadcastName} capabilityIdentity={capabilityIdentity} onRewindReady={registerRewind} replayActive={replayActive} onReplayState={handleReplayState} audioMuted={audioMuted} /> : 
           <HlsPlayer gameId={canonicalGameId || gameId} /> : 
       <div className="video-placeholder"><div className="play-orb">▶</div><p>{isPublisher ? 'Requesting camera publishing capability…' : 'Requesting live viewing capability…'}</p></div>}
       {archivedEvent ? <ArchivedReplay key={replaySessionId} gameId={canonicalGameId || gameId} game={game} event={archivedEvent} onClose={() => { setArchivedEvent(undefined); setReplaying(undefined); }} /> : null}
@@ -1195,7 +1215,7 @@ function App() {
 
     {activeTab === 'organizer' && isOrganizer && game && (
       <section className="tab-content">
-        {organizerSecret ? <OrganizerControls game={game} gameId={canonicalGameId || gameId} secret={organizerSecret} onChange={setGame} /> : <section className="error">Organizer link is missing its secret.</section>}
+        {organizerSecret || getAuthToken() ? <OrganizerControls game={game} gameId={canonicalGameId || gameId} credential={organizerSecret || getAuthToken()} pin={organizerSecret || undefined} onChange={setGame} /> : <section className="error">Sign in as a team member or open an organizer link to manage this game.</section>}
       </section>
     )}
 
@@ -1208,7 +1228,7 @@ function TeamProfile({ teamName }: { teamName: string }) {
   const [games, setGames] = useState<{ gameId: string; homeTeam: string; awayTeam: string; status: string; createdAt: string; startedAt: string | null; endedAt: string | null }[]>([]);
   const [error, setError] = useState('');
   useEffect(() => {
-    fetch(`${API}/v1/teams/${encodeURIComponent(teamName)}/games`)
+    fetch(`${API}/v1/teams/${encodeURIComponent(teamName)}/games`, { headers: authHeaders() })
       .then(async res => { if (!res.ok) throw new Error(); return res.json(); })
       .then((data: any) => setGames(data.games || []))
       .catch(() => setError('Could not load team profile'));
@@ -1480,8 +1500,8 @@ function AuthModal({ onClose, onLogin }: { onClose: () => void, onLogin: (u: Use
     if (!email.includes('@')) return setError('Invalid email.');
     setLoading(true); setError('');
     try {
-      const res = await fetch(`${API}/v1/auth/request-code`, { method: 'POST', body: JSON.stringify({ email }) });
-      const data = await res.json();
+      const res = await fetch(`${API}/v1/auth/request-code`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: email.trim() }) });
+      const data = await res.json() as { error?: string };
       if (!res.ok) throw new Error(data.error || 'Failed to send code.');
       setStep('code');
     } catch (e: any) {
@@ -1496,19 +1516,24 @@ function AuthModal({ onClose, onLogin }: { onClose: () => void, onLogin: (u: Use
     if (code.length < 6) return setError('Invalid code.');
     setLoading(true); setError('');
     try {
-      const res = await fetch(`${API}/v1/auth/verify`, { method: 'POST', body: JSON.stringify({ email, code }) });
-      const data = await res.json();
+      const res = await fetch(`${API}/v1/auth/verify`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: email.trim(), code: code.trim() }) });
+      const data = await res.json() as { error?: string; token?: string };
       if (!res.ok) throw new Error(data.error || 'Invalid code.');
-      
-      const meRes = await fetch(`${API}/v1/users/me`, { credentials: 'include' });
-      if (meRes.ok) {
-        onLogin(await meRes.json());
-        
-        // Merge anonymous saves
-        const viewerSessionId = localStorage.getItem('viewer_session_id');
-        if (viewerSessionId) {
-          fetch(`${API}/v1/auth/merge`, { credentials: 'include', method: 'POST', body: JSON.stringify({ viewerSessionId }) }).catch(console.error);
-        }
+      if (!data.token) throw new Error('No session was returned. Please try again.');
+
+      const meRes = await fetch(`${API}/v1/users/me`, { headers: authHeaders(data.token) });
+      if (!meRes.ok) throw new Error('Could not load your account. Please try again.');
+      const user = await meRes.json() as User;
+      localStorage.setItem(AUTH_TOKEN_KEY, data.token);
+      onLogin(user);
+
+      const viewerSessionId = localStorage.getItem(VIEWER_SESSION_KEY);
+      if (viewerSessionId) {
+        fetch(`${API}/v1/auth/merge`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', ...authHeaders(data.token) },
+          body: JSON.stringify({ viewerSessionId }),
+        }).then(response => { if (!response.ok) console.error('Could not merge anonymous saves'); }).catch(console.error);
       }
     } catch (e: any) {
       setError(e.message);

@@ -29,6 +29,13 @@ npm install
 npx expo start --android
 ```
 
+Sign-in uses the API's emailed six-digit code and a bearer session token. For
+local API development on a USB-connected Android phone, run `adb reverse
+tcp:8787 tcp:8787`, set `EXPO_PUBLIC_API_URL=http://127.0.0.1:8787` in the
+ignored `.env.local`, and rebuild the APK so the URL is embedded. Keep the API
+Worker running while using that local build. Without this override, the app
+uses the deployed API, which needs the email binding and latest D1 migration.
+
 Use a physical Android phone for camera testing. Expo Camera supports device
 preview in Expo Go; native MoQ publishing requires the development APK because
 Expo Go cannot contain the local `MoqNative` module.

@@ -13,6 +13,13 @@ npm install
 npm run dev
 ```
 
+For local sign-in, start the API with `npx wrangler dev` from `apps/api` after
+applying its local D1 migrations. The ignored `.env.development.local` points
+Vite at `http://127.0.0.1:8787`; local Wrangler writes OTP messages to its
+email simulation files. Production builds use the configured deployed API URL.
+The API must be deployed with its email binding and latest migration before
+sign-in against the deployed Worker can work.
+
 Open `/` with a private game id:
 
 ```text

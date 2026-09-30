@@ -687,7 +687,7 @@ current API/permissions are verified; reuse adapter for YouTube later.
 without affecting primary stream; overlay correctness and destination failure
 isolation verified. This is explicitly non-blocking for pilot.
 
-### Sprint 7 — Pilot (4 weeks) **(In Progress)**
+### Sprint 7 — Pilot (4 weeks) **(Completed)**
 
 Onboarding, consent/admin controls, instrumentation review, support runbook and
 5–10 invited teams across real matches.
@@ -696,7 +696,7 @@ Onboarding, consent/admin controls, instrumentation review, support runbook and
 a prioritized remediation list; zero unresolved privacy/security P0s; pilot
 admins can delete recordings/highlights.
 
-### Sprint 8 — Contributed angles (post-pilot feature flag)
+### Sprint 8 — Contributed angles (post-pilot feature flag) **(In Progress)**
 
 QR/private join flow, admin approval, `publish:angle` capabilities, low-rate
 preview rendition, interest-driven promotion, director choice, and synchronized

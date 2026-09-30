@@ -1,3 +1,5 @@
+import { serverTimeOffsetMs } from './api';
+
 /** Uploads bounded, independently decodable H.264 chunks without holding up the relay. */
 export class MediaArchive {
   private frames: Uint8Array[] = [];
@@ -17,7 +19,7 @@ export class MediaArchive {
     if (this.closed) return;
     if (this.firstUs === undefined) {
       this.firstUs = timestampUs;
-      this.firstEpochMs = Date.now();
+      this.firstEpochMs = Date.now() + serverTimeOffsetMs;
     }
     if (keyframe && this.frames.length && timestampUs - this.startUs >= 4_000_000) this.seal();
     if (!this.frames.length) {

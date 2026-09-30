@@ -8,47 +8,77 @@ function error(code: string, status = 400) {
   return json({ error: code }, status);
 }
 
-import { EmailMessage } from 'cloudflare:email';
+const OTP_TTL_MS = 15 * 60 * 1000;
+const OTP_COOLDOWN_MS = 60 * 1000;
+const OTP_MAX_ATTEMPTS = 5;
+const SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
+
+function normalizeEmail(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const email = value.trim().toLowerCase();
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : null;
+}
 
 export async function requestAuthCode(request: Request, env: Env): Promise<Response> {
-  const { email } = await request.json().catch(() => ({})) as { email?: string };
-  if (!email || !email.includes('@')) return error('invalid_email');
+  const input = await request.json().catch(() => null) as { email?: unknown } | null;
+  const normalizedEmail = normalizeEmail(input?.email);
+  if (!normalizedEmail) return error('invalid_email');
 
-  const normalizedEmail = email.toLowerCase().trim();
-  const code = Math.floor(100000 + Math.random() * 900000).toString(); // 6 digits
-  const expiresAt = Date.now() + 15 * 60 * 1000; // 15 mins
+  const from = env.EMAIL_FROM;
+  if (!env.EMAIL || !from) return error('email_unavailable', 503);
+
+  const now = Date.now();
+  const previous = await env.DB.prepare('SELECT requested_at FROM auth_otps WHERE email = ?')
+    .bind(normalizedEmail).first<{ requested_at: number }>();
+  if (previous && now - previous.requested_at < OTP_COOLDOWN_MS) return error('code_recently_requested', 429);
+
+  const random = crypto.getRandomValues(new Uint32Array(1))[0];
+  const code = (100000 + random % 900000).toString();
+  const expiresAt = now + OTP_TTL_MS;
 
   await env.DB.prepare(
-    'INSERT INTO auth_otps (email, code, expires_at) VALUES (?, ?, ?) ON CONFLICT(email) DO UPDATE SET code = excluded.code, expires_at = excluded.expires_at'
-  ).bind(normalizedEmail, code, expiresAt).run();
+    'INSERT INTO auth_otps (email, code, expires_at, requested_at, attempts) VALUES (?, ?, ?, ?, 0) ON CONFLICT(email) DO UPDATE SET code = excluded.code, expires_at = excluded.expires_at, requested_at = excluded.requested_at, attempts = 0'
+  ).bind(normalizedEmail, code, expiresAt, now).run();
 
-  if (env.EMAIL) {
-    try {
-      const msg = new EmailMessage(
-        'no-reply@bleachers.com',
-        normalizedEmail,
-        `Your login code is: ${code}`
-      );
-      await env.EMAIL.send(msg);
-    } catch (e) {
-      console.error('Failed to send email', e);
-    }
+  try {
+    await env.EMAIL.send({
+      from,
+      to: normalizedEmail,
+      subject: 'Your Bleachers sign-in code',
+      text: `Your Bleachers sign-in code is ${code}. It expires in 15 minutes.`,
+    });
+  } catch (cause) {
+    await env.DB.prepare('DELETE FROM auth_otps WHERE email = ? AND code = ?')
+      .bind(normalizedEmail, code).run();
+    console.error('Failed to send sign-in code', cause);
+    return error('email_unavailable', 503);
   }
 
   return json({ success: true, message: 'Code sent to your email.' });
 }
 
 export async function verifyAuthCode(request: Request, env: Env): Promise<Response> {
-  const { email, code } = await request.json().catch(() => ({})) as { email?: string, code?: string };
-  if (!email || !code) return error('invalid_request');
-  const normalizedEmail = email.toLowerCase().trim();
+  const input = await request.json().catch(() => null) as { email?: unknown; code?: unknown } | null;
+  const code = input?.code;
+  const normalizedEmail = normalizeEmail(input?.email);
+  if (!normalizedEmail || typeof code !== 'string' || !/^\d{6}$/.test(code)) return error('invalid_request');
 
-  const otpRecord = await env.DB.prepare('SELECT code, expires_at FROM auth_otps WHERE email = ?').bind(normalizedEmail).first<{ code: string; expires_at: number }>();
+  const otpRecord = await env.DB.prepare('SELECT code, expires_at, attempts FROM auth_otps WHERE email = ?')
+    .bind(normalizedEmail).first<{ code: string; expires_at: number; attempts: number }>();
   if (!otpRecord) return error('invalid_code');
-  if (Date.now() > otpRecord.expires_at) return error('expired_code');
-  if (otpRecord.code !== code) return error('invalid_code');
+  if (Date.now() > otpRecord.expires_at) {
+    await env.DB.prepare('DELETE FROM auth_otps WHERE email = ?').bind(normalizedEmail).run();
+    return error('expired_code');
+  }
+  if (otpRecord.attempts >= OTP_MAX_ATTEMPTS) return error('too_many_attempts', 429);
+  if (otpRecord.code !== code) {
+    await env.DB.prepare('UPDATE auth_otps SET attempts = attempts + 1 WHERE email = ?').bind(normalizedEmail).run();
+    return error('invalid_code');
+  }
 
-  await env.DB.prepare('DELETE FROM auth_otps WHERE email = ?').bind(normalizedEmail).run();
+  const consumed = await env.DB.prepare('DELETE FROM auth_otps WHERE email = ? AND code = ?')
+    .bind(normalizedEmail, code).run();
+  if (consumed.meta.changes !== 1) return error('invalid_code');
 
   let user = await env.DB.prepare('SELECT id FROM users WHERE email = ?').bind(normalizedEmail).first<{ id: string }>();
   if (!user) {
@@ -58,16 +88,16 @@ export async function verifyAuthCode(request: Request, env: Env): Promise<Respon
   }
 
   const token = crypto.randomUUID();
-  const expiresAt = Date.now() + 30 * 24 * 60 * 60 * 1000; // 30 days
+  const expiresAt = Date.now() + SESSION_TTL_SECONDS * 1000;
   await env.DB.prepare('INSERT INTO auth_sessions (token, user_id, expires_at) VALUES (?, ?, ?)').bind(token, user.id, expiresAt).run();
 
-  const res = json({ success: true });
-  res.headers.set('Set-Cookie', `session=${token}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${30 * 24 * 60 * 60}`);
+  const res = json({ success: true, token });
+  res.headers.set('Set-Cookie', `session=${token}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${SESSION_TTL_SECONDS}`);
   return res;
 }
 
 export async function getMe(request: Request, env: Env): Promise<Response> {
-  const userId = request.headers.get('x-user-id');
+  const userId = await authMiddleware(request, env);
   if (!userId) return error('unauthorized', 401);
   const user = await env.DB.prepare('SELECT id, email, name, avatar_url, created_at FROM users WHERE id = ?').bind(userId).first();
   if (!user) return error('not_found', 404);
