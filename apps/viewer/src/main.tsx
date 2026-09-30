@@ -70,13 +70,14 @@ function Draft16Camera({ game, relayUrl, broadcastName, capabilityIdentity, onRe
     return () => window.removeEventListener('pointerdown', unlockAudio, { capture: true });
   }, []);
   useEffect(() => {
-    audioMutedRef.current = audioMuted;
+    const isMuted = audioMuted || replayActive;
+    audioMutedRef.current = isMuted;
     const context = audioContextRef.current;
     if (!context) return;
     audioNextTimeRef.current = 0;
-    if (audioMuted) void context.suspend().catch(() => undefined);
+    if (isMuted) void context.suspend().catch(() => undefined);
     else void context.resume().catch(() => undefined);
-  }, [audioMuted]);
+  }, [audioMuted, replayActive]);
   useEffect(() => {
     let cancelled = false;
     let closeActive: (() => void) | undefined;
@@ -1181,7 +1182,7 @@ function App() {
     {activeTab === 'timeline' && (
       <section className="tab-content timeline">
         <div className="timeline-head"><h2>Game events</h2><span>{saved.size} saved</span></div>
-        {(postgameEvents ?? game?.events)?.length ? (postgameEvents ?? game!.events).map((event) => <TimelineEventItem key={event.id} event={event} game={game} gameId={canonicalGameId || gameId} onPlay={() => playReplay(event)} />) : <p className="muted">No events yet. Goals, saves, and highlights will appear here.</p>}
+        {(postgameEvents ?? game?.events)?.filter((event) => !Number.isNaN(event.gameTimeSeconds) && event.id)?.length ? (postgameEvents ?? game!.events).filter((event) => !Number.isNaN(event.gameTimeSeconds) && event.id).map((event) => <TimelineEventItem key={event.id} event={event} game={game} gameId={canonicalGameId || gameId} onPlay={() => playReplay(event)} />) : <p className="muted">No events yet. Goals, saves, and highlights will appear here.</p>}
       </section>
     )}
 
